@@ -26,10 +26,10 @@ Build dependencies for windowing, audio, and input:
 
 ```bash
 # Debian/Ubuntu
-sudo apt-get install g++ pkg-config libx11-dev libasound2-dev libudev-dev
+sudo apt-get install g++ pkg-config libx11-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
 # Fedora
-sudo dnf install gcc-c++ libX11-devel alsa-lib-devel systemd-devel
+sudo dnf install gcc-c++ libX11-devel alsa-lib-devel systemd-devel wayland-devel libxkbcommon-devel
 ```
 
 You'll also need a Vulkan driver matching your GPU, e.g. `mesa-vulkan-drivers`
