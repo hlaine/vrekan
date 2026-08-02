@@ -178,3 +178,10 @@ to fix later.
 
 Conventional commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`.
 Keep commits scoped to one logical change.
+
+**Do not add `Co-Authored-By`, `Generated with Claude Code`, `Claude-Session`,
+or any other Claude/Anthropic attribution trailer to commit messages or PR
+descriptions.** This repo is public — a session URL or attribution trailer
+gets published permanently to public history. This is enforced via
+`attribution` settings in `.claude/settings.json` as the primary control; this
+rule is a backstop in case that setting doesn't fully suppress it.
