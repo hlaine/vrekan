@@ -1,0 +1,10 @@
+(
+    max_health: 55.0,
+    move_speed: 80.0,
+    aggro_range: 170.0,
+    melee_range: 45.0,
+    melee_damage: 10.0,
+    melee_cooldown: 1.1,
+    color: (0.85, 0.8, 0.6),
+    size: 30.0,
+)

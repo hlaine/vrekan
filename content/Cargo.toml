@@ -3,3 +3,9 @@ name = "content"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+bevy_ecs = { workspace = true }
+game_core = { path = "../game_core" }
+serde = { workspace = true }
+ron = { workspace = true }

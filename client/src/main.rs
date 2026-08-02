@@ -1,9 +1,12 @@
+use std::path::Path;
+
 use bevy::prelude::*;
+use content::{load_all_enemy_templates, spawn_enemy};
 use game_core::combat::{
     attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, Health,
     MeleeAttack,
 };
-use game_core::enemy::{ai_system, Aggro, Enemy};
+use game_core::enemy::ai_system;
 use game_core::movement::{movement_system, MoveSpeed, Position, Velocity};
 use game_core::player::Player;
 use game_core::DeltaSeconds;
@@ -14,14 +17,11 @@ const PLAYER_ATTACK_RANGE: f32 = 60.0;
 const PLAYER_ATTACK_DAMAGE: f32 = 15.0;
 const PLAYER_ATTACK_COOLDOWN: f32 = 0.4;
 
-const ENEMY_SPEED: f32 = 90.0;
-const ENEMY_MAX_HEALTH: f32 = 40.0;
-const ENEMY_ATTACK_RANGE: f32 = 40.0;
-const ENEMY_ATTACK_DAMAGE: f32 = 8.0;
-const ENEMY_ATTACK_COOLDOWN: f32 = 1.0;
-// Kept below the player-enemy spawn distance (~224 units) so an idle player
-// isn't auto-aggro'd; the player has to approach before the enemy engages.
-const ENEMY_AGGRO_RANGE: f32 = 150.0;
+const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
+// Horizontal spacing between spawned enemies so multiple templates don't
+// overlap; kept far enough from the player spawn (origin) that no enemy's
+// aggro_range reaches an idle player at startup.
+const ENEMY_SPAWN_SPACING: f32 = 150.0;
 
 fn main() {
     App::new()
@@ -71,24 +71,23 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
-    commands.spawn((
-        Enemy,
-        Position { x: 200.0, y: 100.0 },
-        Velocity::ZERO,
-        MoveSpeed(ENEMY_SPEED),
-        Health::new(ENEMY_MAX_HEALTH),
-        MeleeAttack {
-            range: ENEMY_ATTACK_RANGE,
-            damage: ENEMY_ATTACK_DAMAGE,
-            cooldown: ENEMY_ATTACK_COOLDOWN,
-        },
-        AttackTimer(0.0),
-        Aggro {
-            range: ENEMY_AGGRO_RANGE,
-        },
-        Sprite::from_color(Color::srgb(0.8, 0.15, 0.15), Vec2::splat(28.0)),
-        Transform::from_xyz(200.0, 100.0, 0.0),
-    ));
+    let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));
+
+    for (index, (_kind, template)) in templates.iter().enumerate() {
+        let position = Position {
+            x: 200.0 + index as f32 * ENEMY_SPAWN_SPACING,
+            y: 100.0,
+        };
+        let entity = spawn_enemy(&mut commands, template, position);
+        commands.entity(entity).insert((
+            Sprite::from_color(
+                Color::srgb(template.color[0], template.color[1], template.color[2]),
+                Vec2::splat(template.size),
+            ),
+            Transform::from_xyz(position.x, position.y, 0.0),
+        ));
+    }
 }
 
 fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {

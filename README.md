@@ -60,9 +60,9 @@ cargo build --workspace --release
 
 ## Running
 
-> **Current status:** the workspace is at the M1 milestone (see
+> **Current status:** the workspace is at the M2 milestone (see
 > `ROADMAP.md`) — `client` is a playable single-player prototype (movement,
-> melee attack, one hardcoded enemy with simple AI). There is no networking
+> melee attack, data-driven enemies with simple AI). There is no networking
 > yet: `server` is still a placeholder binary that prints a startup message
 > and exits. Co-op, replication, and the rest of the behavior below land in
 > later milestones.
@@ -71,8 +71,13 @@ cargo build --workspace --release
 cargo run -p client
 ```
 
-Controls: **WASD** to move, **Space** to melee-attack the nearest enemy in
-range.
+Run this from the repo root — the client loads enemy templates from
+`assets/enemies/` relative to the current directory. Controls: **WASD** to
+move, **Space** to melee-attack the nearest enemy in range.
+
+Enemies are data-driven: adding a new enemy type is just a new `.ron` file in
+`assets/enemies/` (see the existing files for the schema) — no code changes
+needed.
 
 ```bash
 # Placeholder for now — no networking until M3

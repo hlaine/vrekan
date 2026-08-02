@@ -17,9 +17,9 @@ Claude Code tasks as you start it, not all upfront.
 - [x] Runs and is playable locally, single client, no server
 
 ## M2 — Data-driven content
-- [ ] RON schema + loader for enemy templates in `content`
-- [ ] Convert the M1 hardcoded enemy into a data-driven template
-- [ ] Add one more enemy type purely via a new `.ron` file, no engine changes
+- [x] RON schema + loader for enemy templates in `content`
+- [x] Convert the M1 hardcoded enemy into a data-driven template
+- [x] Add one more enemy type purely via a new `.ron` file, no engine changes
   — this is the test that the extensibility goal actually works
 
 ## M3 — Basic networking

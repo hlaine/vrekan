@@ -79,9 +79,14 @@ Each tier shares underlying components (health, damage, loot table, AI pattern)
 but escalates stats and introduces new abilities — this maps directly onto the
 data-driven enemy template system in the `content` crate.
 
-1. Human missionaries / militia
-2. Priests, knights, bishops — introduce "christian" spell types
-3. Divine creatures — furious angels, archangels
+1. Converted pagans — villagers turned against their own people, ascending in
+   power: **converted farmer, missionary**, converted housecarl. Converted
+   farmer and missionary are the first two enemy types being built (M2).
+2. Christians — the invading order's own personnel, ascending: sailor, monk,
+   soldier, priest, knight, bishop, paladin. Priests/knights/bishops+
+   introduce "christian" spell types.
+3. Divine creatures — furious angels, archangels, and other divine beings.
+   Specific roster not yet decided.
 4. Final boss / collapse of the invading god's creation
 
 ## Objectives & dungeons

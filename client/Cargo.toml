@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bevy = { workspace = true }
+content = { path = "../content" }
 game_core = { path = "../game_core" }
 
 [features]
