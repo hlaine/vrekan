@@ -1,13 +1,18 @@
-pub fn placeholder() -> u32 {
-    42
-}
+pub mod combat;
+pub mod enemy;
+pub mod movement;
+pub mod player;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use combat::{AttackRequested, AttackTimer, Health, MeleeAttack};
+pub use enemy::{Aggro, Enemy};
+pub use movement::{MoveSpeed, Position, Velocity};
+pub use player::Player;
 
-    #[test]
-    fn returns_expected_value() {
-        assert_eq!(placeholder(), 42);
-    }
-}
+use bevy_ecs::prelude::*;
+
+/// Seconds elapsed since the last tick. Kept as a plain resource (rather than
+/// depending on `bevy_time`) so `game_core` stays free of any dependency
+/// beyond `bevy_ecs` — the client (and later the server) is responsible for
+/// updating this from its own clock each frame/tick.
+#[derive(Resource, Default)]
+pub struct DeltaSeconds(pub f32);

@@ -11,10 +11,10 @@ Claude Code tasks as you start it, not all upfront.
 - [x] `LICENSE`, `.gitignore`
 
 ## M1 — Single-player core loop (no networking yet)
-- [ ] Player entity: movement (WASD), basic melee attack
-- [ ] One enemy type, hardcoded, with health and a simple AI pattern
-- [ ] `apply_damage` and death handling in `game_core`, unit tested
-- [ ] Runs and is playable locally, single client, no server
+- [x] Player entity: movement (WASD), basic melee attack
+- [x] One enemy type, hardcoded, with health and a simple AI pattern
+- [x] `apply_damage` and death handling in `game_core`, unit tested
+- [x] Runs and is playable locally, single client, no server
 
 ## M2 — Data-driven content
 - [ ] RON schema + loader for enemy templates in `content`

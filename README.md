@@ -60,22 +60,29 @@ cargo build --workspace --release
 
 ## Running
 
-> **Current status:** the workspace is still at the M0 scaffold stage (see
-> `ROADMAP.md`) — `server` and `client` are placeholder binaries that print a
-> startup message and exit. Networking, rendering, and the rest of the
-> behavior described below land in later milestones.
+> **Current status:** the workspace is at the M1 milestone (see
+> `ROADMAP.md`) — `client` is a playable single-player prototype (movement,
+> melee attack, one hardcoded enemy with simple AI). There is no networking
+> yet: `server` is still a placeholder binary that prints a startup message
+> and exits. Co-op, replication, and the rest of the behavior below land in
+> later milestones.
 
 ```bash
-# Start a server (listens for co-op connections; requires an open UDP port)
-cargo run -p server
-
-# In another terminal, start a client
 cargo run -p client
 ```
 
-For local co-op testing on one machine, run one server and two client
-instances; connect both clients to `127.0.0.1`. For testing across machines,
-the host will need to forward the server's UDP port through their router.
+Controls: **WASD** to move, **Space** to melee-attack the nearest enemy in
+range.
+
+```bash
+# Placeholder for now — no networking until M3
+cargo run -p server
+```
+
+Once networking lands, co-op testing on one machine will mean running one
+server and two client instances, both connecting to `127.0.0.1`; testing
+across machines will require the host to forward the server's UDP port
+through their router.
 
 ## Testing
 
@@ -95,8 +102,10 @@ and PR — see `CLAUDE.md` for the full verification-loop policy.
 
 ## Development tips
 
-- Compile times are the biggest friction point during iteration. Consider
-  enabling Bevy's `dynamic_linking` feature for local dev builds, and using a
-  faster linker (`lld` or `mold` on Linux) to speed up rebuilds.
+- Compile times are the biggest friction point during iteration. For faster
+  client rebuilds during local dev, run with Bevy's `dynamic_linking` feature:
+  `cargo run -p client --features dynamic_linking` (don't use this for release
+  builds — it requires shipping Bevy's `.so`/`.dylib`/`.dll` alongside the
+  binary). Using a faster linker (`lld` or `mold` on Linux) also helps.
 - The server never needs a GPU, audio device, or display — it's safe to run
   headless on a minimal machine or CI runner.
