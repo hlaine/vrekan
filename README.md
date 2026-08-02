@@ -1,4 +1,6 @@
-# [Project name TBD]
+# Vrekan
+
+*Old Norse: "I will avenge."*
 
 A co-op multiplayer action RPG (ARPG) — real-time, endgame-style loot grinding,
 no cutscenes, built in Rust with Bevy.

@@ -4,6 +4,8 @@ Conventions and context for working on this project. Read this before making cha
 
 ## Project
 
+Working title: **Vrekan** (Old Norse: "I will avenge").
+
 A co-op multiplayer action RPG (ARPG), loot-grind/hack-and-slash genre.
 Priorities, in order:
 1. Clear, idiomatic architecture over fastest-possible delivery — prefer
