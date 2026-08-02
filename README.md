@@ -60,34 +60,35 @@ cargo build --workspace --release
 
 ## Running
 
-> **Current status:** the workspace is at the M2 milestone (see
-> `ROADMAP.md`) — `client` is a playable single-player prototype (movement,
-> melee attack, data-driven enemies with simple AI). There is no networking
-> yet: `server` is still a placeholder binary that prints a startup message
-> and exits. Co-op, replication, and the rest of the behavior below land in
-> later milestones.
+> **Current status:** the workspace is at the M3 milestone (see
+> `ROADMAP.md`) — movement is now server-authoritative and replicated. Combat
+> (melee attack), enemies, and AI are still simulated locally per client, not
+> networked yet — that lands in M4.
 
 ```bash
+# Start a server (listens on UDP port 5000)
+cargo run -p server
+
+# In one or two other terminals, start a client
 cargo run -p client
 ```
 
-Run this from the repo root — the client loads enemy templates from
+Run both from the repo root — the client loads enemy templates from
 `assets/enemies/` relative to the current directory. Controls: **WASD** to
-move, **Space** to melee-attack the nearest enemy in range.
+move (sent to the server, which simulates and replicates position back),
+**Space** to melee-attack the nearest enemy in range (still local-only for
+now).
+
+For local co-op testing on one machine, run one server and up to two client
+instances (`ROADMAP`/`DESIGN` party cap for v1) — each client connects to
+`127.0.0.1:5000` automatically. For testing across machines, the host will
+need to forward the server's UDP port (5000) through their router, and
+clients will need the `server` crate's connection address made configurable
+(currently hardcoded to localhost — a future milestone).
 
 Enemies are data-driven: adding a new enemy type is just a new `.ron` file in
 `assets/enemies/` (see the existing files for the schema) — no code changes
 needed.
-
-```bash
-# Placeholder for now — no networking until M3
-cargo run -p server
-```
-
-Once networking lands, co-op testing on one machine will mean running one
-server and two client instances, both connecting to `127.0.0.1`; testing
-across machines will require the host to forward the server's UDP port
-through their router.
 
 ## Testing
 

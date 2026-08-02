@@ -23,9 +23,9 @@ Claude Code tasks as you start it, not all upfront.
   — this is the test that the extensibility goal actually works
 
 ## M3 — Basic networking
-- [ ] Headless `server` binary, `MinimalPlugins`
-- [ ] bevy_replicon wired up: position replication for a moving entity
-- [ ] Two clients connect to one local server, see each other move
+- [x] Headless `server` binary, `MinimalPlugins`
+- [x] bevy_replicon wired up: position replication for a moving entity
+- [x] Two clients connect to one local server, see each other move
 
 ## M4 — Combat & damage type system, networked
 - [ ] `DamageType` + resistance system from `game_core`, server-authoritative

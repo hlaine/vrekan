@@ -1,8 +1,9 @@
 use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::DeltaSeconds;
 
-#[derive(Component, Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
