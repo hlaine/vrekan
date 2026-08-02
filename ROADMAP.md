@@ -6,9 +6,9 @@ be small enough to review in a sitting; break a milestone into individual
 Claude Code tasks as you start it, not all upfront.
 
 ## M0 — Workspace scaffold
-- [ ] Cargo workspace with all crates from `CLAUDE.md`, compiling but empty
-- [ ] CI (fmt check, clippy deny-warnings, test) passing on a trivial commit
-- [ ] `LICENSE`, `.gitignore`
+- [x] Cargo workspace with all crates from `CLAUDE.md`, compiling but empty
+- [x] CI (fmt check, clippy deny-warnings, test) passing on a trivial commit
+- [x] `LICENSE`, `.gitignore`
 
 ## M1 — Single-player core loop (no networking yet)
 - [ ] Player entity: movement (WASD), basic melee attack

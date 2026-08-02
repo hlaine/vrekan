@@ -60,6 +60,11 @@ cargo build --workspace --release
 
 ## Running
 
+> **Current status:** the workspace is still at the M0 scaffold stage (see
+> `ROADMAP.md`) — `server` and `client` are placeholder binaries that print a
+> startup message and exit. Networking, rendering, and the rest of the
+> behavior described below land in later milestones.
+
 ```bash
 # Start a server (listens for co-op connections; requires an open UDP port)
 cargo run -p server
