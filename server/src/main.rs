@@ -16,16 +16,35 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
 };
-use game_core::movement::leash_system;
+use content::{load_all_enemy_templates, spawn_enemy};
+use game_core::combat::{
+    attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, Health,
+    MeleeAttack,
+};
+use game_core::enemy::ai_system;
+use game_core::movement::{leash_system, movement_system};
 use game_core::{DeltaSeconds, MoveSpeed, Player, Position};
-use protocol::{MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
+use protocol::{AttackInput, MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
 
 const PLAYER_SPEED: f32 = 200.0;
 const PLAYER_COLLIDER_RADIUS: f32 = 16.0;
+const PLAYER_MAX_HEALTH: f32 = 100.0;
+const PLAYER_ATTACK_RANGE: f32 = 60.0;
+const PLAYER_ATTACK_DAMAGE: f32 = 15.0;
+const PLAYER_ATTACK_COOLDOWN: f32 = 0.4;
 const MAX_CLIENTS: usize = 2;
 const TICK_RATE: f64 = 60.0;
 
 const MAP_PATH: &str = "assets/maps/valley.tmx";
+const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
+// Enemies spawn in the map's bottom open field (rows 12-14, well clear of
+// the mountain band and the player's top-left spawn point) — see
+// assets/maps/valley.tmx and spawn_map_colliders' coordinate convention.
+const ENEMY_SPAWN_BASE: Position = Position {
+    x: 150.0,
+    y: -420.0,
+};
+const ENEMY_SPAWN_SPACING: f32 = 150.0;
 
 fn main() {
     App::new()
@@ -45,15 +64,22 @@ fn main() {
         // Top-down game: no downward pull, movement is fully player/AI-driven.
         .insert_resource(Gravity(Vector::ZERO))
         .init_resource::<DeltaSeconds>()
-        .add_systems(Startup, (setup, spawn_map_colliders))
+        .add_message::<AttackRequested>()
+        .add_systems(Startup, (setup, spawn_map_colliders, spawn_enemies))
         .add_systems(
             Update,
             (
                 update_delta_seconds,
                 apply_move_input,
+                apply_attack_input,
                 sync_physics_position_to_game_core,
                 leash_system,
                 sync_game_core_position_to_physics,
+                ai_system,
+                movement_system,
+                tick_attack_timers,
+                attack_system,
+                death_system,
             )
                 .chain(),
         )
@@ -112,6 +138,13 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
         Player,
         Position { x: 0.0, y: 0.0 },
         MoveSpeed(PLAYER_SPEED),
+        Health::new(PLAYER_MAX_HEALTH),
+        MeleeAttack {
+            range: PLAYER_ATTACK_RANGE,
+            damage: PLAYER_ATTACK_DAMAGE,
+            cooldown: PLAYER_ATTACK_COOLDOWN,
+        },
+        AttackTimer(0.0),
         Replicated,
         RigidBody::Dynamic,
         Collider::circle(PLAYER_COLLIDER_RADIUS),
@@ -120,6 +153,25 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
         PhysicsPosition(Vector::ZERO),
         LinearVelocity::default(),
     ));
+}
+
+/// Loads every enemy template and spawns one instance of each in the map's
+/// bottom open field. Enemies are simulated with the plain
+/// `game_core::movement` integrator (`Velocity`/`movement_system`), not
+/// avian2d — they don't yet collide with map terrain, only chase/attack the
+/// nearest player (see `game_core::enemy::ai_system`).
+fn spawn_enemies(mut commands: Commands) {
+    let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));
+
+    for (index, (kind, template)) in templates.iter().enumerate() {
+        let position = Position {
+            x: ENEMY_SPAWN_BASE.x + index as f32 * ENEMY_SPAWN_SPACING,
+            y: ENEMY_SPAWN_BASE.y,
+        };
+        let entity = spawn_enemy(&mut commands, kind.clone(), template, position);
+        commands.entity(entity).insert(Replicated);
+    }
 }
 
 /// Loads the map's "collision" object layer and spawns a static avian2d
@@ -173,6 +225,22 @@ fn apply_move_input(
         };
         velocity.x = input.x * speed.0;
         velocity.y = input.y * speed.0;
+    }
+}
+
+/// Turns a client's `AttackInput` message into an `AttackRequested` event for
+/// their own player entity — `attack_system` resolves range/cooldown/target/
+/// damage from there, same as it does for enemy-initiated attacks from
+/// `ai_system`.
+fn apply_attack_input(
+    mut inputs: MessageReader<FromClient<AttackInput>>,
+    mut attack_events: MessageWriter<AttackRequested>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        attack_events.write(AttackRequested { attacker: entity });
     }
 }
 

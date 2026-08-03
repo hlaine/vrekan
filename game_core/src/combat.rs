@@ -1,9 +1,10 @@
 use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::movement::Position;
 use crate::DeltaSeconds;
 
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Health {
     pub current: f32,
     pub max: f32,

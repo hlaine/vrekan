@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bevy_ecs::prelude::*;
-use game_core::{Aggro, AttackTimer, Enemy, Health, MeleeAttack, MoveSpeed, Position, Velocity};
+use game_core::{
+    Aggro, AttackTimer, Enemy, EnemyKind, Health, MeleeAttack, MoveSpeed, Position, Velocity,
+};
 use serde::Deserialize;
 
 use crate::ContentError;
@@ -67,15 +69,20 @@ pub fn load_all_enemy_templates(dir: &Path) -> Result<Vec<(String, EnemyTemplate
 
 /// Spawns the gameplay-simulation entity for a template — no visual
 /// components. The caller (client) is responsible for turning
-/// `EnemyTemplate::color`/`size` into an actual `Sprite`.
+/// `EnemyTemplate::color`/`size` into an actual `Sprite`; `kind` (the
+/// template's key, e.g. from `load_all_enemy_templates`) is attached as
+/// `EnemyKind` so a client that only sees this entity via replication can
+/// still look up that appearance data itself.
 pub fn spawn_enemy(
     commands: &mut Commands,
+    kind: impl Into<String>,
     template: &EnemyTemplate,
     position: Position,
 ) -> Entity {
     commands
         .spawn((
             Enemy,
+            EnemyKind(kind.into()),
             position,
             Velocity::ZERO,
             MoveSpeed(template.move_speed),

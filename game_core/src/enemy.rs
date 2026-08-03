@@ -1,11 +1,20 @@
 use bevy_ecs::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::combat::{AttackRequested, MeleeAttack};
 use crate::movement::{MoveSpeed, Position, Velocity};
 use crate::player::Player;
 
-#[derive(Component, Debug, Default, Clone, Copy)]
+#[derive(Component, Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Enemy;
+
+/// Which content template (`content::EnemyTemplate`, keyed by filename stem —
+/// e.g. "converted_farmer") this enemy was spawned from. Replicated so
+/// clients can pick the right appearance for a server-spawned enemy without
+/// needing the full template sent over the wire — the client already has
+/// the same `.ron` files loaded locally for that lookup.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnemyKind(pub String);
 
 /// Distance within which an enemy notices and chases the player. Should
 /// generally be larger than `MeleeAttack::range`, or the enemy never moves

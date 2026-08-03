@@ -2,13 +2,13 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
-use game_core::Position;
+use game_core::{Enemy, EnemyKind, Health, Position};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
 /// shapes) so incompatible client/server builds refuse to connect instead of
 /// silently desyncing.
-pub const PROTOCOL_ID: u64 = 0;
+pub const PROTOCOL_ID: u64 = 1;
 
 pub const SERVER_PORT: u16 = 5000;
 
@@ -21,6 +21,13 @@ pub struct MoveInput {
     pub y: f32,
 }
 
+/// Sent when the player presses the melee-attack button. No payload — the
+/// server resolves the actual attack (range, cooldown, target, damage)
+/// against its own authoritative state, never trusting client-supplied
+/// combat outcomes.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttackInput;
+
 /// Registers everything that crosses the network, so the client and server
 /// binaries can't independently drift on what's replicated or which
 /// messages exist between them.
@@ -30,6 +37,10 @@ impl Plugin for NetworkPlugin {
     fn build(&self, app: &mut App) {
         app.replicate::<Position>()
             .replicate::<NetworkId>()
-            .add_client_message::<MoveInput>(Channel::Unreliable);
+            .replicate::<Health>()
+            .replicate::<Enemy>()
+            .replicate::<EnemyKind>()
+            .add_client_message::<MoveInput>(Channel::Unreliable)
+            .add_client_message::<AttackInput>(Channel::Unordered);
     }
 }

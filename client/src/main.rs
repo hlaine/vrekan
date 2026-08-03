@@ -12,28 +12,18 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
     RenetChannelsExt, RenetClient, RepliconRenetPlugins,
 };
-use content::{load_all_enemy_templates, spawn_enemy};
-use game_core::combat::{
-    attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, Health,
-    MeleeAttack,
-};
-use game_core::enemy::ai_system;
-use game_core::movement::{movement_system, Position};
+use content::{load_all_enemy_templates, EnemyTemplate};
+use game_core::movement::Position;
 use game_core::player::Player;
-use game_core::{DeltaSeconds, LEASH_DISTANCE};
-use protocol::{MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
+use game_core::{DeltaSeconds, Enemy, EnemyKind, LEASH_DISTANCE};
+use protocol::{AttackInput, MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
 
-const PLAYER_MAX_HEALTH: f32 = 100.0;
-const PLAYER_ATTACK_RANGE: f32 = 60.0;
-const PLAYER_ATTACK_DAMAGE: f32 = 15.0;
-const PLAYER_ATTACK_COOLDOWN: f32 = 0.4;
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
 
+// Only used to look up appearance (color/size) for a replicated enemy by
+// its `EnemyKind` — the server is what actually spawns/simulates enemies
+// now (see `server/src/main.rs`'s `spawn_enemies`).
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
-// Horizontal spacing between spawned enemies so multiple templates don't
-// overlap; kept far enough from the player spawn (origin) that no enemy's
-// aggro_range reaches an idle player at startup.
-const ENEMY_SPAWN_SPACING: f32 = 150.0;
 
 // Relative to the assets root (loaded via AssetServer), not the filesystem
 // path used for ENEMY_TEMPLATES_DIR above. Must stay in sync with the
@@ -67,6 +57,12 @@ struct LocalClientId(u64);
 #[derive(Resource, Default)]
 struct LocalPlayer(Option<Entity>);
 
+/// Enemy templates loaded purely for appearance lookup (color/size) by
+/// `EnemyKind` — see `init_replicated_enemies`. Simulation-relevant fields
+/// (health, damage, AI ranges) only matter server-side now.
+#[derive(Resource)]
+struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
+
 fn main() {
     App::new()
         .add_plugins(
@@ -93,19 +89,14 @@ fn main() {
         .add_plugins(TiledPlugin::default())
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
-        .add_message::<AttackRequested>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
             (
                 update_delta_seconds,
                 init_replicated_players,
+                init_replicated_enemies,
                 player_input_system,
-                ai_system,
-                movement_system,
-                tick_attack_timers,
-                attack_system,
-                death_system,
                 sync_transform_system,
                 party_camera_system,
                 leash_indicator_system,
@@ -125,21 +116,7 @@ fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
 
     let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
         .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));
-
-    for (index, (_kind, template)) in templates.iter().enumerate() {
-        let position = Position {
-            x: 200.0 + index as f32 * ENEMY_SPAWN_SPACING,
-            y: 100.0,
-        };
-        let entity = spawn_enemy(&mut commands, template, position);
-        commands.entity(entity).insert((
-            Sprite::from_color(
-                Color::srgb(template.color[0], template.color[1], template.color[2]),
-                Vec2::splat(template.size),
-            ),
-            Transform::from_xyz(position.x, position.y, 0.0),
-        ));
-    }
+    commands.insert_resource(EnemyTemplates(templates));
 }
 
 fn connect_to_server(mut commands: Commands, channels: Res<RepliconChannels>) -> Result<()> {
@@ -174,9 +151,11 @@ fn connect_to_server(mut commands: Commands, channels: Res<RepliconChannels>) ->
 }
 
 /// Reacts to newly-replicated player entities: the one matching our own
-/// `LocalClientId` becomes our controlled `Player` (with local combat
-/// components, since combat isn't networked until M4); everyone else is
-/// just a `RemotePlayer` we render but don't otherwise act on.
+/// `LocalClientId` becomes our controlled `Player`; everyone else is just a
+/// `RemotePlayer` we render but don't otherwise act on. Combat components
+/// (`Health`, `MeleeAttack`, `AttackTimer`) live server-side only now —
+/// `Health` replicates in on its own, the rest never need to exist
+/// client-side (see `server/src/main.rs`'s `on_client_connected`).
 fn init_replicated_players(
     mut commands: Commands,
     my_client_id: Res<LocalClientId>,
@@ -188,13 +167,6 @@ fn init_replicated_players(
             local_player.0 = Some(entity);
             commands.entity(entity).insert((
                 Player,
-                Health::new(PLAYER_MAX_HEALTH),
-                MeleeAttack {
-                    range: PLAYER_ATTACK_RANGE,
-                    damage: PLAYER_ATTACK_DAMAGE,
-                    cooldown: PLAYER_ATTACK_COOLDOWN,
-                },
-                AttackTimer(0.0),
                 Sprite::from_color(PLAYER_COLOR, Vec2::splat(32.0)),
                 Transform::default(),
             ));
@@ -208,6 +180,33 @@ fn init_replicated_players(
     }
 }
 
+/// Query filter matching newly-replicated enemy entities.
+type NewEnemies<'w, 's> =
+    Query<'w, 's, (Entity, &'static EnemyKind), (With<Enemy>, Added<EnemyKind>)>;
+
+/// Reacts to newly-replicated enemy entities (spawned server-side — see
+/// `server/src/main.rs`'s `spawn_enemies`), giving each one the appearance
+/// its `EnemyKind` maps to in our locally-loaded `EnemyTemplates`. Enemy
+/// AI/combat is fully server-authoritative; the client only renders them.
+fn init_replicated_enemies(
+    mut commands: Commands,
+    templates: Res<EnemyTemplates>,
+    new_enemies: NewEnemies,
+) {
+    for (entity, kind) in &new_enemies {
+        let Some((_, template)) = templates.0.iter().find(|(k, _)| *k == kind.0) else {
+            continue;
+        };
+        commands.entity(entity).insert((
+            Sprite::from_color(
+                Color::srgb(template.color[0], template.color[1], template.color[2]),
+                Vec2::splat(template.size),
+            ),
+            Transform::default(),
+        ));
+    }
+}
+
 fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
     delta.0 = time.delta_secs();
 }
@@ -216,11 +215,11 @@ fn player_input_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     local_player: Res<LocalPlayer>,
     mut move_input: MessageWriter<MoveInput>,
-    mut attack_events: MessageWriter<AttackRequested>,
+    mut attack_input: MessageWriter<AttackInput>,
 ) {
-    let Some(entity) = local_player.0 else {
+    if local_player.0.is_none() {
         return;
-    };
+    }
 
     let mut direction = Vec2::ZERO;
     if keyboard.pressed(KeyCode::KeyW) {
@@ -243,7 +242,7 @@ fn player_input_system(
     });
 
     if keyboard.just_pressed(KeyCode::Space) {
-        attack_events.write(AttackRequested { attacker: entity });
+        attack_input.write(AttackInput);
     }
 }
 

@@ -5461,6 +5461,7 @@ dependencies = [
  "bevy",
  "bevy_replicon",
  "bevy_replicon_renet",
+ "content",
  "game_core",
  "protocol",
  "tiled",

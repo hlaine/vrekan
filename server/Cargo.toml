@@ -10,5 +10,6 @@ avian2d = { workspace = true, features = ["2d", "f32", "parry-f32"] }
 tiled = { workspace = true }
 bevy_replicon = { workspace = true }
 bevy_replicon_renet = { workspace = true }
+content = { path = "../content" }
 game_core = { path = "../game_core" }
 protocol = { path = "../protocol" }
