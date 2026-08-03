@@ -12,7 +12,10 @@ pub use combat::{
 pub use enemy::{Aggro, Enemy, EnemyKind};
 pub use movement::{leash_system, Facing, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
 pub use player::{Downed, Player};
-pub use progression::{grant_xp, xp_required, Level, Stats, UnspentStatPoints, XpReward};
+pub use progression::{
+    apply_death_xp_penalty, grant_xp, reset_xp_on_full_wipe, xp_required, Level, Stats,
+    UnspentStatPoints, XpReward,
+};
 pub use revive::{revive_system, Reviving};
 pub use status_effect::{
     tick_status_effects, ActiveEffects, EffectDefinition, EffectKind, EffectTarget, StackMode,

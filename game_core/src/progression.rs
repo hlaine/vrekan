@@ -1,9 +1,13 @@
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Character level and progress toward the next one. XP-on-death penalties
-/// and resurrection-point checkpointing (see MECHANICS.md's Progression
-/// section) aren't implemented yet — this is XP/level tracking only.
+use crate::player::{Downed, Player};
+
+/// Character level and progress toward the next one. See MECHANICS.md's
+/// Progression section for the death-penalty rules `apply_death_xp_penalty`
+/// and `reset_xp_on_full_wipe` implement. Resurrection-point checkpointing
+/// is separate — moved to M9 (`ROADMAP.md`), since it needs dungeon-entry/
+/// objective triggers that don't exist yet.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Level {
     pub level: u32,
@@ -70,9 +74,49 @@ pub fn grant_xp(level: &mut Level, points: &mut UnspentStatPoints, amount: f32) 
     }
 }
 
+/// Fraction of current in-level XP lost on an individual death. Tuning
+/// data, not a settled number (see MECHANICS.md's Progression section).
+/// Only ever reduces `xp`, never `level`, so the "floors at the start of
+/// the current level, never drops it" rule holds automatically — there's
+/// no separate clamp to get wrong.
+const DEATH_XP_PENALTY_FRACTION: f32 = 0.2;
+
+/// Applies the individual-death XP penalty the instant a player becomes
+/// `Downed` — `Added<Downed>` fires exactly once per downing, not every
+/// tick they stay downed, so this doesn't need `death_system` (in
+/// `combat.rs`) to know anything about progression at all.
+pub fn apply_death_xp_penalty(mut newly_downed: Query<&mut Level, Added<Downed>>) {
+    for mut level in &mut newly_downed {
+        level.xp *= 1.0 - DEATH_XP_PENALTY_FRACTION;
+    }
+}
+
+/// A full party wipe (every connected player currently downed) resets
+/// in-level XP to zero for all of them — see MECHANICS.md's Progression
+/// section. This supersedes `apply_death_xp_penalty`'s partial loss for
+/// whichever player was downed last, rather than stacking with it (a wipe
+/// is its own outcome, not "one more partial loss"). Runs every tick
+/// rather than only on the exact transition — reapplying zero to an
+/// already-zeroed value is a harmless no-op, and detecting "just became a
+/// full wipe this tick" precisely isn't worth the extra state to track.
+///
+/// Guards against the empty-party case explicitly: `Iterator::all` is
+/// vacuously true on an empty iterator, so without the `count == 0` guard
+/// zero connected players would misread as "everyone's downed."
+pub fn reset_xp_on_full_wipe(mut players: Query<(&mut Level, Has<Downed>), With<Player>>) {
+    let count = players.iter().count();
+    if count == 0 || !players.iter().all(|(_, downed)| downed) {
+        return;
+    }
+    for (mut level, _) in &mut players {
+        level.xp = 0.0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_ecs::system::RunSystemOnce;
 
     #[test]
     fn xp_required_grows_with_level() {
@@ -116,5 +160,101 @@ mod tests {
         assert_eq!(level.level, 4);
         assert!((level.xp - 5.0).abs() < 1e-4);
         assert_eq!(points.0, STAT_POINTS_PER_LEVEL * 3);
+    }
+
+    #[test]
+    fn death_penalty_reduces_xp_but_never_the_level() {
+        let mut world = World::new();
+        let player = world
+            .spawn((
+                Player,
+                Downed,
+                Level {
+                    level: 3,
+                    xp: 100.0,
+                },
+            ))
+            .id();
+
+        let _ = world.run_system_once(apply_death_xp_penalty);
+
+        let level = world.get::<Level>(player).unwrap();
+        assert_eq!(level.level, 3);
+        assert!((level.xp - 80.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn death_penalty_only_applies_once_at_the_moment_of_downing() {
+        // Uses a persistent `Schedule` rather than two separate
+        // `run_system_once` calls: each `run_system_once` builds a fresh,
+        // stateless system with no memory of a prior run, so `Added<T>`
+        // would (incorrectly, for this test's purpose) read as true again
+        // on a second call regardless of whether the component is
+        // actually new. A `Schedule` run twice on the same `World`
+        // preserves each system's last-run tick between calls, matching
+        // how this system actually behaves across real ticks in the
+        // server's schedule.
+        let mut world = World::new();
+        let player = world
+            .spawn((
+                Player,
+                Downed,
+                Level {
+                    level: 1,
+                    xp: 100.0,
+                },
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(apply_death_xp_penalty);
+
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+
+        // The second tick sees the same `Downed` insertion, not a new one,
+        // so the penalty must not apply twice.
+        assert!((world.get::<Level>(player).unwrap().xp - 80.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn full_wipe_resets_xp_to_zero_for_every_downed_player() {
+        let mut world = World::new();
+        let a = world
+            .spawn((Player, Downed, Level { level: 2, xp: 50.0 }))
+            .id();
+        let b = world
+            .spawn((Player, Downed, Level { level: 5, xp: 30.0 }))
+            .id();
+
+        let _ = world.run_system_once(reset_xp_on_full_wipe);
+
+        assert_eq!(world.get::<Level>(a).unwrap(), &Level { level: 2, xp: 0.0 });
+        assert_eq!(world.get::<Level>(b).unwrap(), &Level { level: 5, xp: 0.0 });
+    }
+
+    #[test]
+    fn full_wipe_does_nothing_while_any_player_is_still_up() {
+        let mut world = World::new();
+        let downed = world
+            .spawn((Player, Downed, Level { level: 2, xp: 50.0 }))
+            .id();
+        world.spawn((Player, Level { level: 1, xp: 10.0 }));
+
+        let _ = world.run_system_once(reset_xp_on_full_wipe);
+
+        assert!((world.get::<Level>(downed).unwrap().xp - 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn full_wipe_does_nothing_with_no_players_connected() {
+        // Regression guard: `Iterator::all` is vacuously true on an empty
+        // iterator, so without an explicit empty-party check this would
+        // otherwise misfire (there's nothing to even panic on, but a
+        // system that silently "wipes" an empty world would be a sign the
+        // guard regressed).
+        let mut world = World::new();
+
+        let _ = world.run_system_once(reset_xp_on_full_wipe);
     }
 }

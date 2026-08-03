@@ -28,9 +28,10 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    revive_system, tick_status_effects, ActiveEffects, DeltaSeconds, Downed, EffectDefinition,
-    EffectKind, EffectTarget, Enemy, Facing, Level, MoveSpeed, Player, Position, Reviving,
-    StackMode, Stat, Stats, Stunned, UnspentStatPoints, Velocity,
+    apply_death_xp_penalty, reset_xp_on_full_wipe, revive_system, tick_status_effects,
+    ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy, Facing,
+    Level, MoveSpeed, Player, Position, Reviving, StackMode, Stat, Stats, Stunned,
+    UnspentStatPoints, Velocity,
 };
 use protocol::{
     AttackInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT,
@@ -159,6 +160,8 @@ fn main() {
                 attack_system,
                 tick_status_effects,
                 death_system,
+                apply_death_xp_penalty,
+                reset_xp_on_full_wipe,
                 revive_system,
             )
                 .chain(),

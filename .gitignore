@@ -18,6 +18,8 @@
 *.swp
 
 # Runtime-generated save data and client identity — see server/src/persistence.rs
-# and client/src/main.rs's load_or_create_character_id.
+# and client/src/main.rs's load_or_create_character_id. character_id_*.txt covers
+# the per-instance override filenames used when running multiple local clients.
 /saves/
 character_id.txt
+character_id_*.txt
