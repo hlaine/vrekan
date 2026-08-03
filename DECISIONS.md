@@ -360,3 +360,42 @@ elsewhere. Also worth remembering when building the downed-state system:
 `death_system` will need to stop treating players and enemies identically,
 likely via a marker/branch that routes a zero-health `Player` entity to a
 downed-state transition instead of `commands.entity(entity).despawn()`.
+
+---
+
+## `DamageType` is a data-keyed string, not a fixed Rust enum (M4)
+
+**Context:** `DESIGN.md`'s Damage & faction system and `MECHANICS.md` both
+frame `DamageType` as something new content should be able to add "as
+content, not engine changes" — the same extensibility principle already
+applied to enemies (`content::EnemyTemplate`) and enemy appearance
+(`EnemyKind`). The obvious default in Rust is a `enum DamageType { Primal,
+Holy, ... }`, since enums are the idiomatic way to model a closed set of
+kinds — but a closed set is exactly what this isn't supposed to be: every
+new tier of enemy (per `DESIGN.md`'s Enemy tiering — sailors, monks,
+priests, and beyond eventually introducing "christian" holy/radiant types)
+is expected to bring its own damage types, and a Rust enum would mean an
+engine-code change (a new variant, plus every `match` over it) for each one.
+
+**Decision:** `DamageType(pub String)` — a plain newtype wrapping an owned
+`String`, deriving `Hash`/`Eq` so it works as a `HashMap` key in
+`Resistances`. Content authors write damage types as plain strings directly
+in `.ron` files (e.g. `melee_damage_type: "primal"`, `resistances:
+{"holy": 0.2}`); `content::spawn_enemy` wraps the parsed strings into
+`DamageType` only at spawn time when building the `MeleeAttack` and
+`Resistances` components — `EnemyTemplate` itself stores plain
+`String`/`HashMap<String, f32>` fields, not `DamageType` directly, so RON
+parsing doesn't need `DamageType` to implement any special map-key
+deserialization behavior.
+
+**Consequences:** There's no compile-time exhaustiveness checking — a typo
+in a `.ron` file's damage type string (`"primmal"` instead of `"primal"`)
+won't be caught by the compiler or by `content`'s existing malformed-file
+tests; it'll just silently resolve to 0% resistance at runtime (no matching
+`Resistances` key), which could read as "this enemy just doesn't resist
+that type" rather than "there's a typo somewhere." If mismatched damage-type
+strings turn out to be a recurring content-authoring mistake once more
+damage types exist (M4's later tiers), worth revisiting: e.g. a content
+crate test that cross-checks every enemy template's damage-type strings and
+resistance keys against a canonical list, without giving up the
+data-driven-ness of the type itself.
