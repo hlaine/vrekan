@@ -22,8 +22,11 @@ use game_core::combat::{
     DamageType, Health, MeleeAttack,
 };
 use game_core::enemy::ai_system;
-use game_core::movement::{leash_system, movement_system};
-use game_core::{revive_system, DeltaSeconds, Downed, MoveSpeed, Player, Position, Reviving};
+use game_core::movement::leash_system;
+use game_core::{
+    revive_system, DeltaSeconds, Downed, Enemy, Facing, MoveSpeed, Player, Position, Reviving,
+    Velocity,
+};
 use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
 
 const PLAYER_SPEED: f32 = 200.0;
@@ -79,11 +82,12 @@ fn main() {
                 apply_move_input,
                 apply_attack_input,
                 apply_revive_input,
+                freeze_downed_players,
                 sync_physics_position_to_game_core,
                 leash_system,
                 sync_game_core_position_to_physics,
                 ai_system,
-                movement_system,
+                sync_enemy_velocity_to_physics,
                 tick_attack_timers,
                 attack_system,
                 death_system,
@@ -146,6 +150,7 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
     commands.entity(add.entity).insert((
         Player,
         Position { x: 0.0, y: 0.0 },
+        Facing::default(),
         MoveSpeed(PLAYER_SPEED),
         Health::new(PLAYER_MAX_HEALTH),
         MeleeAttack {
@@ -172,18 +177,47 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
 /// A player who dies mid-move would otherwise keep sliding under whatever
 /// `LinearVelocity` they last had — `apply_move_input` stops issuing new
 /// velocity for a downed player (see below) but never zeroes out what's
-/// already there.
+/// already there. This only handles the instant of going down; see
+/// `freeze_downed_players` for why a downed player's velocity also needs
+/// zeroing on every later tick, not just this one.
 fn on_player_downed(add: On<Add, Downed>, mut velocities: Query<&mut LinearVelocity>) {
     if let Ok(mut velocity) = velocities.get_mut(add.entity) {
         *velocity = LinearVelocity::ZERO;
     }
 }
 
+/// A downed player keeps a solid `Collider`/`RigidBody::Dynamic` (see
+/// `MECHANICS.md`'s downed-state section — still physically present, not
+/// incorporeal), so another player or an enemy bumping into them imparts a
+/// fresh physics impulse into their `LinearVelocity` on every such
+/// collision, not just at the moment they went down. Nothing else ever
+/// issues a downed player new velocity (`apply_move_input` skips them via
+/// `Without<Downed>`), so left alone that impulse would integrate into
+/// unbounded drift instead of a single bounded nudge — found via live
+/// testing, not a hypothetical. Re-zeroing every tick stops it from
+/// compounding tick over tick; it can't undo the current tick's already-
+/// resolved physics step, so a small one-tick nudge on contact is expected
+/// and fine, just not a runaway one.
+fn freeze_downed_players(mut downed: Query<&mut LinearVelocity, With<Downed>>) {
+    for mut velocity in &mut downed {
+        *velocity = LinearVelocity::ZERO;
+    }
+}
+
 /// Loads every enemy template and spawns one instance of each in the map's
-/// bottom open field. Enemies are simulated with the plain
-/// `game_core::movement` integrator (`Velocity`/`movement_system`), not
-/// avian2d — they don't yet collide with map terrain, only chase/attack the
-/// nearest player (see `game_core::enemy::ai_system`).
+/// bottom open field. `game_core::enemy::ai_system` decides each enemy's
+/// desired `Velocity` (chase/idle/attack); `avian2d` resolves the actual
+/// movement and collision against terrain, players, and other enemies, same
+/// as `on_client_connected`'s player setup — see
+/// `sync_enemy_velocity_to_physics` for how `Velocity` gets translated into
+/// `LinearVelocity` each tick.
+///
+/// No explicit `Mass`/`ColliderDensity`: avian2d auto-computes mass from a
+/// `Collider`'s shape area × density (default `1.0`), so sizing the collider
+/// from the same `template.size` already used for the sprite gives bigger
+/// enemies proportionally more mass "for free" — a big enemy barely budges
+/// when a player bumps it, a small one gets shoved more easily, with no new
+/// content field needed.
 fn spawn_enemies(mut commands: Commands) {
     let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
         .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));
@@ -194,7 +228,15 @@ fn spawn_enemies(mut commands: Commands) {
             y: ENEMY_SPAWN_BASE.y,
         };
         let entity = spawn_enemy(&mut commands, kind.clone(), template, position);
-        commands.entity(entity).insert(Replicated);
+        commands.entity(entity).insert((
+            Replicated,
+            RigidBody::Dynamic,
+            Collider::circle(template.size / 2.0),
+            LockedAxes::ROTATION_LOCKED,
+            Friction::ZERO,
+            PhysicsPosition(Vector::new(position.x, position.y)),
+            LinearVelocity::default(),
+        ));
     }
 }
 
@@ -242,7 +284,11 @@ fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
 type MovablePlayers<'w, 's> = Query<
     'w,
     's,
-    (&'static MoveSpeed, &'static mut LinearVelocity),
+    (
+        &'static MoveSpeed,
+        &'static mut LinearVelocity,
+        &'static mut Facing,
+    ),
     (With<Player>, Without<Downed>),
 >;
 
@@ -251,11 +297,12 @@ fn apply_move_input(mut inputs: MessageReader<FromClient<MoveInput>>, mut player
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((speed, mut velocity)) = players.get_mut(entity) else {
+        let Ok((speed, mut velocity, mut facing)) = players.get_mut(entity) else {
             continue;
         };
         velocity.x = input.x * speed.0;
         velocity.y = input.y * speed.0;
+        facing.update_from_direction(input.x, input.y);
     }
 }
 
@@ -293,14 +340,19 @@ fn apply_revive_input(mut inputs: MessageReader<FromClient<ReviveInput>>, mut co
     }
 }
 
+/// Any `avian2d` body whose `game_core::Position` needs to stay in sync with
+/// physics — players and enemies alike.
+type PhysicsBodies = Or<(With<Player>, With<Enemy>)>;
+
 /// Copies avian2d's resolved position into the replicated `game_core::Position`
 /// each tick, after the physics step has already run (avian2d schedules its
 /// solver in `FixedUpdate`, which runs before `Update` in Bevy's schedule
-/// order) — see `on_client_connected`'s doc comment.
+/// order) — see `on_client_connected`'s doc comment. Covers enemies too, now
+/// that they're `avian2d` bodies as well (see `spawn_enemies`).
 fn sync_physics_position_to_game_core(
-    mut players: Query<(&PhysicsPosition, &mut Position), With<Player>>,
+    mut bodies: Query<(&PhysicsPosition, &mut Position), PhysicsBodies>,
 ) {
-    for (physics_position, mut position) in &mut players {
+    for (physics_position, mut position) in &mut bodies {
         position.x = physics_position.x;
         position.y = physics_position.y;
     }
@@ -309,12 +361,33 @@ fn sync_physics_position_to_game_core(
 /// Writes `leash_system`'s clamped `game_core::Position` back into avian2d's
 /// own `PhysicsPosition`, so next tick's physics step starts from the
 /// clamped position rather than silently un-clamping it — see
-/// `on_client_connected`'s doc comment.
+/// `on_client_connected`'s doc comment. Covers enemies too (a no-op for them
+/// today, since nothing between the two sync calls touches enemy
+/// `Position` the way `leash_system` does for players — kept symmetric with
+/// `sync_physics_position_to_game_core` rather than maintaining two
+/// separate systems for what's otherwise identical logic).
 fn sync_game_core_position_to_physics(
-    mut players: Query<(&Position, &mut PhysicsPosition), With<Player>>,
+    mut bodies: Query<(&Position, &mut PhysicsPosition), PhysicsBodies>,
 ) {
-    for (position, mut physics_position) in &mut players {
+    for (position, mut physics_position) in &mut bodies {
         physics_position.x = position.x;
         physics_position.y = position.y;
+    }
+}
+
+/// Translates `ai_system`'s decided `Velocity` into avian2d's `LinearVelocity`
+/// for enemies, the same role `apply_move_input` plays for players (reading
+/// `MoveInput` instead of an AI decision). Enemies no longer move via
+/// `game_core::movement::movement_system`'s plain integrator — avian2d now
+/// resolves their actual position, including collision against terrain,
+/// players, and each other (see `spawn_enemies`). `movement_system` itself
+/// stays in `game_core`, still tested there; nothing in this binary calls it
+/// anymore.
+fn sync_enemy_velocity_to_physics(
+    mut enemies: Query<(&Velocity, &mut LinearVelocity), With<Enemy>>,
+) {
+    for (velocity, mut linear_velocity) in &mut enemies {
+        linear_velocity.x = velocity.x;
+        linear_velocity.y = velocity.y;
     }
 }

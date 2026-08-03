@@ -48,6 +48,38 @@ impl Velocity {
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct MoveSpeed(pub f32);
 
+/// Normalized last-nonzero movement direction. Holds its previous value
+/// while stationary, so an idle or attacking entity keeps facing whichever
+/// way it last moved — this is what "aimed" means in DESIGN.md's Core loop
+/// (facing-based, not independent mouse-look), and applies to both players
+/// and enemies (see MECHANICS.md's Combat section).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Facing {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Default for Facing {
+    /// Facing "down" (toward the camera in this top-down game) before
+    /// anything has moved yet.
+    fn default() -> Self {
+        Facing { x: 0.0, y: -1.0 }
+    }
+}
+
+impl Facing {
+    /// Updates to point toward `(x, y)`, normalized, if it's nonzero. A
+    /// zero vector means "not moving this tick" and is a no-op.
+    pub fn update_from_direction(&mut self, x: f32, y: f32) {
+        if x == 0.0 && y == 0.0 {
+            return;
+        }
+        let len = (x * x + y * y).sqrt();
+        self.x = x / len;
+        self.y = y / len;
+    }
+}
+
 pub fn movement_system(delta: Res<DeltaSeconds>, mut query: Query<(&mut Position, &Velocity)>) {
     let dt = delta.0;
     for (mut position, velocity) in &mut query {
@@ -99,6 +131,26 @@ pub fn leash_system(mut players: Query<&mut Position, With<Player>>) {
 mod tests {
     use super::*;
     use bevy_ecs::system::RunSystemOnce;
+
+    #[test]
+    fn facing_default_points_down() {
+        assert_eq!(Facing::default(), Facing { x: 0.0, y: -1.0 });
+    }
+
+    #[test]
+    fn facing_updates_and_normalizes_on_nonzero_direction() {
+        let mut facing = Facing::default();
+        facing.update_from_direction(3.0, 4.0);
+        assert!((facing.x - 0.6).abs() < 1e-5);
+        assert!((facing.y - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn facing_holds_previous_value_on_zero_direction() {
+        let mut facing = Facing { x: 1.0, y: 0.0 };
+        facing.update_from_direction(0.0, 0.0);
+        assert_eq!(facing, Facing { x: 1.0, y: 0.0 });
+    }
 
     #[test]
     fn movement_system_integrates_velocity_over_delta_time() {

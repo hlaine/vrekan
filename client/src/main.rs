@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use bevy::camera::Projection;
+use bevy::gizmos::prelude::*;
 use bevy::prelude::*;
 use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
 use bevy_replicon::prelude::*;
@@ -15,7 +16,7 @@ use bevy_replicon_renet::{
 use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
-use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, LEASH_DISTANCE};
+use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, Facing, LEASH_DISTANCE};
 use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
@@ -46,6 +47,12 @@ const PLAYER_LEASH_WARNING_COLOR: Color = Color::srgb(0.9, 0.15, 0.15);
 // shade of the leash-warning red, since a downed player and a
 // near-the-leash player need to read as different situations at a glance.
 const DOWNED_COLOR: Color = Color::srgb(0.5, 0.5, 0.5);
+
+// Placeholder facing-direction indicator — a debug-style gizmo arrow, not
+// real art. Length is a fraction of the player collider's diameter (32
+// units) so it reads as "pointing off the sprite," not lost inside it.
+const FACING_ARROW_LENGTH: f32 = 24.0;
+const FACING_ARROW_COLOR: Color = Color::WHITE;
 
 /// Marks a replicated player entity that isn't ours — rendered, but not a
 /// target for our local AI/attack systems (`game_core::Player` is reserved
@@ -106,6 +113,7 @@ fn main() {
                 sync_transform_system,
                 party_camera_system,
                 player_appearance_system,
+                facing_indicator_system,
             )
                 .chain(),
         )
@@ -355,5 +363,21 @@ fn player_appearance_system(
         } else {
             REMOTE_PLAYER_COLOR
         };
+    }
+}
+
+/// Draws a facing-direction arrow for every entity with a `Facing` —
+/// players and enemies alike, local or remote, with no special-casing.
+/// Gizmos are immediate-mode (redrawn from scratch every frame from
+/// whatever `Position`/`Facing` currently hold), so there's no spawned
+/// indicator entity or lifecycle to manage, and no stale-state risk like
+/// the sprite-tint overlay bug fixed in `player_appearance_system`.
+/// Placeholder visualization, not real art — see MECHANICS.md's Combat
+/// section for what `Facing` means.
+fn facing_indicator_system(query: Query<(&Position, &Facing)>, mut gizmos: Gizmos) {
+    for (position, facing) in &query {
+        let start = Vec2::new(position.x, position.y);
+        let end = start + Vec2::new(facing.x, facing.y) * FACING_ARROW_LENGTH;
+        gizmos.arrow_2d(start, end, FACING_ARROW_COLOR);
     }
 }

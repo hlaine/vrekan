@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use bevy_ecs::prelude::*;
 use game_core::{
-    Aggro, AttackTimer, CombatStats, DamageType, Enemy, EnemyKind, Health, MeleeAttack, MoveSpeed,
-    Position, Resistances, Velocity,
+    Aggro, AttackTimer, CombatStats, DamageType, Enemy, EnemyKind, Facing, Health, MeleeAttack,
+    MoveSpeed, Position, Resistances, Velocity,
 };
 use serde::Deserialize;
 
@@ -103,6 +103,7 @@ pub fn spawn_enemy(
             EnemyKind(kind.into()),
             position,
             Velocity::ZERO,
+            Facing::default(),
             MoveSpeed(template.move_speed),
             Health::new(template.max_health),
             MeleeAttack {

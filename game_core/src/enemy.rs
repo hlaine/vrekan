@@ -2,7 +2,7 @@ use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::combat::{AttackRequested, MeleeAttack};
-use crate::movement::{MoveSpeed, Position, Velocity};
+use crate::movement::{Facing, MoveSpeed, Position, Velocity};
 use crate::player::{Downed, Player};
 
 #[derive(Component, Debug, Default, Clone, Copy, Serialize, Deserialize)]
@@ -28,6 +28,7 @@ type EnemyQueryData = (
     Entity,
     &'static Position,
     &'static mut Velocity,
+    &'static mut Facing,
     &'static MoveSpeed,
     &'static MeleeAttack,
     &'static Aggro,
@@ -39,13 +40,16 @@ type EnemyQueryData = (
 /// distance while outside melee range, and attacks once in range. A downed
 /// player is out of combat entirely (see MECHANICS.md) and a party with no
 /// eligible player at all (zero connected, or the sole player downed) means
-/// every enemy just idles.
+/// every enemy just idles. `Facing` tracks the same movement direction as
+/// `velocity` (a no-op while idle or attacking, since `velocity` is zero
+/// then) — same movement-derived mechanism as players, see MECHANICS.md's
+/// Combat section.
 pub fn ai_system(
     player_query: Query<&Position, (With<Player>, Without<Downed>)>,
     mut enemies: Query<EnemyQueryData, With<Enemy>>,
     mut attack_events: MessageWriter<AttackRequested>,
 ) {
-    for (entity, enemy_pos, mut velocity, speed, melee, aggro) in &mut enemies {
+    for (entity, enemy_pos, mut velocity, mut facing, speed, melee, aggro) in &mut enemies {
         let nearest_player = player_query
             .iter()
             .min_by(|a, b| enemy_pos.distance(a).total_cmp(&enemy_pos.distance(b)));
@@ -64,6 +68,7 @@ pub fn ai_system(
             *velocity = Velocity::ZERO;
             attack_events.write(AttackRequested { attacker: entity });
         }
+        facing.update_from_direction(velocity.x, velocity.y);
     }
 }
 
@@ -79,6 +84,7 @@ mod tests {
                 Enemy,
                 position,
                 Velocity::ZERO,
+                Facing::default(),
                 MoveSpeed(3.0),
                 MeleeAttack {
                     range: 1.0,
@@ -115,6 +121,36 @@ mod tests {
         let velocity = *world.get::<Velocity>(enemy).unwrap();
         assert!(velocity.x > 0.0);
         assert_eq!(velocity.y, 0.0);
+    }
+
+    #[test]
+    fn enemy_facing_tracks_chase_direction() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.spawn((Player, Position { x: 10.0, y: 0.0 }));
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 20.0);
+
+        let _ = world.run_system_once(ai_system);
+
+        let facing = *world.get::<Facing>(enemy).unwrap();
+        assert!(facing.x > 0.0);
+        assert_eq!(facing.y, 0.0);
+    }
+
+    #[test]
+    fn enemy_facing_holds_steady_while_idle() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.spawn((Player, Position { x: 100.0, y: 0.0 }));
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 10.0);
+        world.entity_mut(enemy).insert(Facing { x: 0.0, y: 1.0 });
+
+        let _ = world.run_system_once(ai_system);
+
+        assert_eq!(
+            *world.get::<Facing>(enemy).unwrap(),
+            Facing { x: 0.0, y: 1.0 }
+        );
     }
 
     #[test]
