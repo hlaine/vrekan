@@ -16,7 +16,7 @@ use bevy_replicon_renet::{
 use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
-use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, Facing, LEASH_DISTANCE};
+use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, Facing, Stunned, LEASH_DISTANCE};
 use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
@@ -47,6 +47,11 @@ const PLAYER_LEASH_WARNING_COLOR: Color = Color::srgb(0.9, 0.15, 0.15);
 // shade of the leash-warning red, since a downed player and a
 // near-the-leash player need to read as different situations at a glance.
 const DOWNED_COLOR: Color = Color::srgb(0.5, 0.5, 0.5);
+
+// Distinct from both DOWNED_COLOR and the leash-warning red — a stunned
+// player can still be attacked/downed, so it needs to read as its own
+// state at a glance, not a shade of either.
+const STUNNED_COLOR: Color = Color::srgb(0.9, 0.85, 0.2);
 
 // Placeholder facing-direction indicator — a debug-style gizmo arrow, not
 // real art. Length is a fraction of the player collider's diameter (32
@@ -325,7 +330,7 @@ fn party_camera_system(
 type PartySprites<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static mut Sprite, Has<Downed>),
+    (Entity, &'static mut Sprite, Has<Downed>, Has<Stunned>),
     Or<(With<Player>, With<RemotePlayer>)>,
 >;
 
@@ -333,10 +338,12 @@ type PartySprites<'w, 's> = Query<
 /// than overlaying a tint on top of whatever color was there before — that
 /// overlay approach can't un-tint a `RemotePlayer` once `Downed` is
 /// removed (ally-revive), since nothing else runs every frame to restore
-/// their base color. `Downed` wins over the leash-warning tint; only the
-/// local player gets a leash-warning tint at all (the boundary itself is
-/// enforced server-side, see DESIGN.md's Camera & movement section — this
-/// is cosmetic feedback, not the real HUD indicator planned for M8).
+/// their base color. `Downed` wins over `Stunned`, which wins over the
+/// leash-warning tint; only the local player gets a leash-warning tint at
+/// all (the boundary itself is enforced server-side, see DESIGN.md's
+/// Camera & movement section — this is cosmetic feedback, not the real HUD
+/// indicator planned for M8). Enemies don't get a `Stunned` tint yet — see
+/// DECISIONS.md for why that's deferred, not an oversight.
 fn player_appearance_system(
     local_player: Res<LocalPlayer>,
     party: PartyPositions,
@@ -345,9 +352,11 @@ fn player_appearance_system(
     let centroid = party_centroid_and_spread(&party).map(|(centroid, _)| centroid);
     let warning_threshold = (LEASH_DISTANCE / 2.0) * LEASH_WARNING_RATIO;
 
-    for (entity, mut sprite, downed) in &mut sprites {
+    for (entity, mut sprite, downed, stunned) in &mut sprites {
         sprite.color = if downed {
             DOWNED_COLOR
+        } else if stunned {
+            STUNNED_COLOR
         } else if Some(entity) == local_player.0 {
             let near_leash_limit =
                 centroid

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{AttackRequested, MeleeAttack};
 use crate::movement::{Facing, MoveSpeed, Position, Velocity};
 use crate::player::{Downed, Player};
+use crate::status_effect::Stunned;
 
 #[derive(Component, Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Enemy;
@@ -32,6 +33,7 @@ type EnemyQueryData = (
     &'static MoveSpeed,
     &'static MeleeAttack,
     &'static Aggro,
+    Has<Stunned>,
 );
 
 /// Simple chase-and-attack pattern: each enemy targets whichever non-downed
@@ -44,12 +46,25 @@ type EnemyQueryData = (
 /// `velocity` (a no-op while idle or attacking, since `velocity` is zero
 /// then) — same movement-derived mechanism as players, see MECHANICS.md's
 /// Combat section.
+///
+/// A stunned enemy is force-stopped and skipped entirely, every tick — not
+/// filtered out of the query. `ai_system` runs unconditionally each tick
+/// and is what feeds `sync_enemy_velocity_to_physics`, so excluding a
+/// stunned enemy from the query would leave its stale `Velocity` copied
+/// into `LinearVelocity` forever, the same "forgot to re-zero every tick"
+/// bug already found and fixed for downed players (see DECISIONS.md).
 pub fn ai_system(
     player_query: Query<&Position, (With<Player>, Without<Downed>)>,
     mut enemies: Query<EnemyQueryData, With<Enemy>>,
     mut attack_events: MessageWriter<AttackRequested>,
 ) {
-    for (entity, enemy_pos, mut velocity, mut facing, speed, melee, aggro) in &mut enemies {
+    for (entity, enemy_pos, mut velocity, mut facing, speed, melee, aggro, stunned) in &mut enemies
+    {
+        if stunned {
+            *velocity = Velocity::ZERO;
+            continue;
+        }
+
         let nearest_player = player_query
             .iter()
             .min_by(|a, b| enemy_pos.distance(a).total_cmp(&enemy_pos.distance(b)));
@@ -91,6 +106,7 @@ mod tests {
                     damage: 5.0,
                     cooldown: 1.0,
                     damage_type: DamageType("primal".to_string()),
+                    effects: vec![],
                 },
                 Aggro { range: aggro_range },
             ))
@@ -151,6 +167,22 @@ mod tests {
             *world.get::<Facing>(enemy).unwrap(),
             Facing { x: 0.0, y: 1.0 }
         );
+    }
+
+    #[test]
+    fn enemy_freezes_and_skips_targeting_when_stunned() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.spawn((Player, Position { x: 0.5, y: 0.0 }));
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 20.0);
+        world.entity_mut(enemy).insert(Stunned);
+
+        let _ = world.run_system_once(ai_system);
+
+        assert_eq!(*world.get::<Velocity>(enemy).unwrap(), Velocity::ZERO);
+        let events = world.resource::<Messages<AttackRequested>>();
+        let mut cursor = events.get_cursor();
+        assert_eq!(cursor.read(events).count(), 0);
     }
 
     #[test]

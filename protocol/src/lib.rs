@@ -2,7 +2,7 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
-use game_core::{Downed, Enemy, EnemyKind, Facing, Health, Position};
+use game_core::{Downed, Enemy, EnemyKind, Facing, Health, Position, Stunned};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
@@ -62,6 +62,7 @@ impl Plugin for NetworkPlugin {
             .replicate::<EnemyKind>()
             .replicate::<Downed>()
             .replicate::<Facing>()
+            .replicate::<Stunned>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable);

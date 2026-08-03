@@ -4,12 +4,79 @@ use std::path::{Path, PathBuf};
 
 use bevy_ecs::prelude::*;
 use game_core::{
-    Aggro, AttackTimer, CombatStats, DamageType, Enemy, EnemyKind, Facing, Health, MeleeAttack,
-    MoveSpeed, Position, Resistances, Velocity,
+    ActiveEffects, Aggro, AttackTimer, CombatStats, DamageType, EffectDefinition, EffectKind,
+    EffectTarget, Enemy, EnemyKind, Facing, Health, MeleeAttack, MoveSpeed, Position, Resistances,
+    StackMode, Stat, Velocity,
 };
 use serde::Deserialize;
 
 use crate::ContentError;
+
+/// RON-facing mirror of `game_core::EffectKind` — kept separate rather than
+/// deriving `Deserialize` on `EffectKind` directly because that enum's
+/// `DamageOverTime` variant carries a `DamageType`, and content schema
+/// stays decoupled from `game_core`'s internal representation the same way
+/// `EnemyTemplate::melee_damage_type` is a plain `String`, not a
+/// `DamageType`, converted at this same spawn-time boundary.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub enum EffectKindTemplate {
+    DamageOverTime {
+        damage_type: String,
+        tick_interval: f32,
+    },
+    Stun,
+    StatModifier {
+        stat: Stat,
+    },
+}
+
+/// RON-facing mirror of `game_core::EffectDefinition` — see
+/// `EffectKindTemplate`'s doc comment for why only the `kind` field needs
+/// mirroring.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct EffectTemplate {
+    pub id: String,
+    pub kind: EffectKindTemplate,
+    pub duration: f32,
+    pub magnitude: f32,
+    pub stack_mode: StackMode,
+    pub applies_to: EffectTarget,
+    /// Fraction of landed hits that apply this effect. Optional — omit for
+    /// "always applies" (see `game_core::EffectDefinition::chance`'s doc
+    /// comment for why this exists: a guaranteed, refresh-duration CC
+    /// effect can permalock a target if its duration outlasts the
+    /// inflictor's attack cooldown).
+    #[serde(default = "full_chance")]
+    pub chance: f32,
+}
+
+fn full_chance() -> f32 {
+    1.0
+}
+
+impl EffectTemplate {
+    fn into_definition(self) -> EffectDefinition {
+        EffectDefinition {
+            id: self.id,
+            kind: match self.kind {
+                EffectKindTemplate::DamageOverTime {
+                    damage_type,
+                    tick_interval,
+                } => EffectKind::DamageOverTime {
+                    damage_type: DamageType(damage_type),
+                    tick_interval,
+                },
+                EffectKindTemplate::Stun => EffectKind::Stun,
+                EffectKindTemplate::StatModifier { stat } => EffectKind::StatModifier { stat },
+            },
+            duration: self.duration,
+            magnitude: self.magnitude,
+            stack_mode: self.stack_mode,
+            applies_to: self.applies_to,
+            chance: self.chance,
+        }
+    }
+}
 
 /// Data-driven stats + appearance for an enemy type. Appearance is plain
 /// data (no `bevy_sprite`/`bevy_render` types) so `content` stays reusable by
@@ -32,6 +99,10 @@ pub struct EnemyTemplate {
     pub resistances: HashMap<String, f32>,
     pub color: [f32; 3],
     pub size: f32,
+    /// Effects this enemy's melee attack applies on a landed hit — see
+    /// MECHANICS.md's Combat section. Optional: most enemies apply nothing.
+    #[serde(default)]
+    pub effects: Vec<EffectTemplate>,
 }
 
 pub fn parse_enemy_template(ron_str: &str) -> ron::error::SpannedResult<EnemyTemplate> {
@@ -96,6 +167,12 @@ pub fn spawn_enemy(
             .map(|(damage_type, fraction)| (DamageType(damage_type.clone()), *fraction))
             .collect(),
     );
+    let effects: Vec<EffectDefinition> = template
+        .effects
+        .iter()
+        .cloned()
+        .map(EffectTemplate::into_definition)
+        .collect();
 
     commands
         .spawn((
@@ -111,6 +188,7 @@ pub fn spawn_enemy(
                 damage: template.melee_damage,
                 cooldown: template.melee_cooldown,
                 damage_type: DamageType(template.melee_damage_type.clone()),
+                effects,
             },
             CombatStats {
                 crit_chance: template.crit_chance,
@@ -118,6 +196,7 @@ pub fn spawn_enemy(
             },
             resistances,
             AttackTimer(0.0),
+            ActiveEffects::default(),
             Aggro {
                 range: template.aggro_range,
             },
@@ -128,6 +207,17 @@ pub fn spawn_enemy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for the actual shipped content files, not just the
+    /// inline fixtures below — hand-typed RON (especially the `effects`
+    /// enum-variant syntax) only fails loudly at server startup otherwise,
+    /// per `CLAUDE.md`'s "malformed .ron should fail loudly and clearly"
+    /// testing guidance; this catches it in `cargo test` instead.
+    #[test]
+    fn real_enemy_templates_load_successfully() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/enemies");
+        load_all_enemy_templates(&dir).unwrap();
+    }
 
     const VALID_TEMPLATE: &str = r#"(
         max_health: 40.0,

@@ -10,4 +10,22 @@
     crit_multiplier: 1.5,
     color: (0.8, 0.15, 0.15),
     size: 28.0,
+    // Daze: repeated hits just extend the stun, not stack its length —
+    // demonstrates RefreshDuration stacking (see MECHANICS.md's Combat
+    // section). Only a chance per hit, and duration is kept well under
+    // melee_cooldown (1.0s) on purpose: a guaranteed stun whose duration
+    // outlasts the farmer's own attack cooldown can permalock the target
+    // (every hit refreshes the clock before it expires) — found via live
+    // testing, not a hypothetical.
+    effects: [
+        (
+            id: "daze",
+            kind: Stun,
+            duration: 0.6,
+            magnitude: 0.0,
+            stack_mode: RefreshDuration,
+            applies_to: Target,
+            chance: 0.25,
+        ),
+    ],
 )

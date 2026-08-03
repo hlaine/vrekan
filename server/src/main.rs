@@ -24,8 +24,9 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    revive_system, DeltaSeconds, Downed, Enemy, Facing, MoveSpeed, Player, Position, Reviving,
-    Velocity,
+    revive_system, tick_status_effects, ActiveEffects, DeltaSeconds, Downed, EffectDefinition,
+    EffectKind, EffectTarget, Enemy, Facing, MoveSpeed, Player, Position, Reviving, StackMode,
+    Stat, Stunned, Velocity,
 };
 use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
 
@@ -41,6 +42,13 @@ const PLAYER_ATTACK_COOLDOWN: f32 = 0.4;
 const PLAYER_ATTACK_DAMAGE_TYPE: &str = "primal";
 const PLAYER_CRIT_CHANCE: f32 = 0.1;
 const PLAYER_CRIT_MULTIPLIER: f32 = 1.5;
+// "Fury": a self-buff that procs on a landed hit, stacking independently
+// (see MECHANICS.md's Combat section) — consecutive hits build separate
+// stacking crit-chance bonuses, self-limited by attack cooldown × duration
+// rather than growing unbounded.
+const PLAYER_FURY_ID: &str = "fury";
+const PLAYER_FURY_CRIT_CHANCE_BONUS: f32 = 0.05;
+const PLAYER_FURY_DURATION_SECS: f32 = 3.0;
 const MAX_CLIENTS: usize = 2;
 const TICK_RATE: f64 = 60.0;
 
@@ -82,7 +90,7 @@ fn main() {
                 apply_move_input,
                 apply_attack_input,
                 apply_revive_input,
-                freeze_downed_players,
+                freeze_incapacitated_players,
                 sync_physics_position_to_game_core,
                 leash_system,
                 sync_game_core_position_to_physics,
@@ -90,6 +98,7 @@ fn main() {
                 sync_enemy_velocity_to_physics,
                 tick_attack_timers,
                 attack_system,
+                tick_status_effects,
                 death_system,
                 revive_system,
             )
@@ -158,19 +167,33 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
             damage: PLAYER_ATTACK_DAMAGE,
             cooldown: PLAYER_ATTACK_COOLDOWN,
             damage_type: DamageType(PLAYER_ATTACK_DAMAGE_TYPE.to_string()),
+            effects: vec![EffectDefinition {
+                id: PLAYER_FURY_ID.to_string(),
+                kind: EffectKind::StatModifier {
+                    stat: Stat::CritChance,
+                },
+                duration: PLAYER_FURY_DURATION_SECS,
+                magnitude: PLAYER_FURY_CRIT_CHANCE_BONUS,
+                stack_mode: StackMode::Independent,
+                applies_to: EffectTarget::Attacker,
+                chance: 1.0,
+            }],
         },
         CombatStats {
             crit_chance: PLAYER_CRIT_CHANCE,
             crit_multiplier: PLAYER_CRIT_MULTIPLIER,
         },
         AttackTimer(0.0),
-        Replicated,
-        RigidBody::Dynamic,
-        Collider::circle(PLAYER_COLLIDER_RADIUS),
-        LockedAxes::ROTATION_LOCKED,
-        Friction::ZERO,
-        PhysicsPosition(Vector::ZERO),
-        LinearVelocity::default(),
+        ActiveEffects::default(),
+        (
+            Replicated,
+            RigidBody::Dynamic,
+            Collider::circle(PLAYER_COLLIDER_RADIUS),
+            LockedAxes::ROTATION_LOCKED,
+            Friction::ZERO,
+            PhysicsPosition(Vector::ZERO),
+            LinearVelocity::default(),
+        ),
     ));
 }
 
@@ -178,8 +201,8 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
 /// `LinearVelocity` they last had — `apply_move_input` stops issuing new
 /// velocity for a downed player (see below) but never zeroes out what's
 /// already there. This only handles the instant of going down; see
-/// `freeze_downed_players` for why a downed player's velocity also needs
-/// zeroing on every later tick, not just this one.
+/// `freeze_incapacitated_players` for why a downed player's velocity also
+/// needs zeroing on every later tick, not just this one.
 fn on_player_downed(add: On<Add, Downed>, mut velocities: Query<&mut LinearVelocity>) {
     if let Ok(mut velocity) = velocities.get_mut(add.entity) {
         *velocity = LinearVelocity::ZERO;
@@ -191,15 +214,17 @@ fn on_player_downed(add: On<Add, Downed>, mut velocities: Query<&mut LinearVeloc
 /// incorporeal), so another player or an enemy bumping into them imparts a
 /// fresh physics impulse into their `LinearVelocity` on every such
 /// collision, not just at the moment they went down. Nothing else ever
-/// issues a downed player new velocity (`apply_move_input` skips them via
-/// `Without<Downed>`), so left alone that impulse would integrate into
-/// unbounded drift instead of a single bounded nudge — found via live
-/// testing, not a hypothetical. Re-zeroing every tick stops it from
-/// compounding tick over tick; it can't undo the current tick's already-
-/// resolved physics step, so a small one-tick nudge on contact is expected
-/// and fine, just not a runaway one.
-fn freeze_downed_players(mut downed: Query<&mut LinearVelocity, With<Downed>>) {
-    for mut velocity in &mut downed {
+/// issues a downed *or stunned* player new velocity (`apply_move_input`
+/// skips both via `Without<Downed>, Without<Stunned>`), so left alone that
+/// impulse would integrate into unbounded drift instead of a single
+/// bounded nudge — found via live testing, not a hypothetical. Re-zeroing
+/// every tick stops it from compounding tick over tick; it can't undo the
+/// current tick's already-resolved physics step, so a small one-tick nudge
+/// on contact is expected and fine, just not a runaway one.
+type Incapacitated = Or<(With<Downed>, With<Stunned>)>;
+
+fn freeze_incapacitated_players(mut players: Query<&mut LinearVelocity, Incapacitated>) {
+    for mut velocity in &mut players {
         *velocity = LinearVelocity::ZERO;
     }
 }
@@ -278,7 +303,7 @@ fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
     delta.0 = time.delta_secs();
 }
 
-/// A downed player is out of combat entirely and ignores move input — see
+/// A downed or stunned player is out of action and ignores move input — see
 /// `game_core::combat::attack_system`'s doc comment for the same rule
 /// applied to attacking.
 type MovablePlayers<'w, 's> = Query<
@@ -289,7 +314,7 @@ type MovablePlayers<'w, 's> = Query<
         &'static mut LinearVelocity,
         &'static mut Facing,
     ),
-    (With<Player>, Without<Downed>),
+    (With<Player>, Without<Downed>, Without<Stunned>),
 >;
 
 fn apply_move_input(mut inputs: MessageReader<FromClient<MoveInput>>, mut players: MovablePlayers) {

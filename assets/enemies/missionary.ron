@@ -14,4 +14,17 @@
     resistances: {"primal": 0.1},
     color: (0.85, 0.8, 0.6),
     size: 30.0,
+    // Bleed: each landed hit ramps up the per-tick damage rather than just
+    // refreshing the clock — demonstrates AddMagnitude stacking (see
+    // MECHANICS.md's Combat section).
+    effects: [
+        (
+            id: "bleed",
+            kind: DamageOverTime(damage_type: "primal", tick_interval: 1.0),
+            duration: 4.0,
+            magnitude: 3.0,
+            stack_mode: AddMagnitude,
+            applies_to: Target,
+        ),
+    ],
 )

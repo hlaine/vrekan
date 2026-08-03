@@ -3,11 +3,12 @@ use bevy_ecs::prelude::*;
 use crate::combat::Health;
 use crate::movement::Position;
 use crate::player::Downed;
+use crate::status_effect::Stunned;
 use crate::DeltaSeconds;
 
 /// Set (via network input translation in `server`) while a player holds the
-/// revive/interact button. Not inherently `Downed`-safe — `revive_system`
-/// filters this out with `Without<Downed>` wherever a downed entity
+/// revive/interact button. Not inherently `Downed`/`Stunned`-safe —
+/// `revive_system` filters those out wherever a downed or stunned entity
 /// shouldn't be able to act as a reviver, including for itself.
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub struct Reviving;
@@ -39,14 +40,19 @@ type DownedAllies<'w, 's> = Query<
     With<Downed>,
 >;
 
-/// For each downed entity, checks whether any non-downed `Reviving` entity
-/// is within `REVIVE_RANGE`. If not, any accumulated `ReviveProgress` is
-/// dropped. If so, progress accumulates by `DeltaSeconds`; on reaching
-/// `REVIVE_DURATION_SECS` the entity is revived at `REVIVE_HEALTH_FRACTION`
-/// of max health and stops being `Downed`.
+/// A downed or stunned entity can't act as a reviver — see `revive_system`.
+type Revivers<'w, 's> =
+    Query<'w, 's, &'static Position, (With<Reviving>, Without<Downed>, Without<Stunned>)>;
+
+/// For each downed entity, checks whether any non-downed, non-stunned
+/// `Reviving` entity is within `REVIVE_RANGE`. If not, any accumulated
+/// `ReviveProgress` is dropped. If so, progress accumulates by
+/// `DeltaSeconds`; on reaching `REVIVE_DURATION_SECS` the entity is
+/// revived at `REVIVE_HEALTH_FRACTION` of max health and stops being
+/// `Downed`.
 pub fn revive_system(
     delta: Res<DeltaSeconds>,
-    revivers: Query<&Position, (With<Reviving>, Without<Downed>)>,
+    revivers: Revivers,
     mut downed: DownedAllies,
     mut commands: Commands,
 ) {

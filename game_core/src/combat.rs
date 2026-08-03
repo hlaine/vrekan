@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::movement::Position;
 use crate::player::{Downed, Player};
+use crate::status_effect::{ActiveEffects, EffectDefinition, EffectTarget, Stat, Stunned};
 use crate::DeltaSeconds;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -100,6 +101,12 @@ pub struct MeleeAttack {
     pub damage: f32,
     pub cooldown: f32,
     pub damage_type: DamageType,
+    /// Effects to apply on a landed hit — see `attack_system` for how
+    /// `EffectDefinition::applies_to` routes each one to the target or the
+    /// attacker. Empty for attacks that apply nothing, which is most of
+    /// them; see MECHANICS.md's Combat section for why this is data, not a
+    /// hardcoded per-attack special case.
+    pub effects: Vec<EffectDefinition>,
 }
 
 /// Seconds remaining before this entity can attack again; `0.0` means ready.
@@ -118,7 +125,7 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
     }
 }
 
-/// A downed entity can't attack — see `attack_system`.
+/// A downed or stunned entity can't attack — see `attack_system`.
 type Attackers<'w, 's> = Query<
     'w,
     's,
@@ -127,29 +134,57 @@ type Attackers<'w, 's> = Query<
         &'static MeleeAttack,
         &'static CombatStats,
         &'static mut AttackTimer,
+        Has<Player>,
     ),
-    Without<Downed>,
+    (Without<Downed>, Without<Stunned>),
 >;
 
-/// A downed entity can't be targeted — see `attack_system`.
+/// A downed entity can't be targeted — see `attack_system`. A *stunned*
+/// entity, unlike a downed one, stays targetable: it can't act, but it
+/// isn't out of combat (see MECHANICS.md's Death, downed state, and revive
+/// section for the contrast with `Downed`). `Has<Player>` is data here (not
+/// a filter) because whether a `Player` target is excluded depends on
+/// whether the *attacker* is also a `Player` — see `attack_system`'s no-PvP
+/// check.
 type AttackTargets<'w, 's> =
-    Query<'w, 's, (Entity, &'static Position), (With<Health>, Without<Downed>)>;
+    Query<'w, 's, (Entity, &'static Position, Has<Player>), (With<Health>, Without<Downed>)>;
 
 /// Resolves queued `AttackRequested` events: if the attacker is off cooldown,
 /// finds the nearest other entity with `Health` within `MeleeAttack::range`
 /// and applies damage to it, resolved via `resolve_damage` (crit, then the
 /// target's resistance for the attack's `DamageType`). A downed entity can
 /// neither attack nor be targeted — it's out of combat entirely (see
-/// MECHANICS.md's Death, downed state, and revive section).
+/// MECHANICS.md's Death, downed state, and revive section). A stunned
+/// entity can't attack either, but stays targetable. Co-op is no-PvP (see
+/// DESIGN.md's Multiplayer scope): a `Player` attacker never selects
+/// another `Player` as its nearest target, even if a teammate happens to
+/// be closer than any enemy — enemies remain attackable either way.
+///
+/// The attacker's own active `StatModifier` effects (e.g. a "fury" buff)
+/// bump the *effective* `CombatStats` passed into `resolve_damage`, computed
+/// fresh here rather than mutating the base component — see
+/// `ActiveEffects::stat_bonus`'s doc comment for why. On a landed hit, each
+/// of `melee.effects` is rolled independently against its own `chance`
+/// (not all-or-nothing per attack) before being applied to whichever side
+/// `EffectDefinition::applies_to` names.
+///
+/// `ActiveEffects` is fetched through its own `all_effects` query (rather
+/// than living in `Attackers`/the target's `healths` query) and read via
+/// `get_many_mut` — the attacker and target are always different entities
+/// (the nearest-target search excludes the attacker itself), but Bevy's
+/// query-conflict check is structural, not runtime-aware: two separate
+/// `Query` params both mutably touching the same component type panics as
+/// unsound even though these two never alias in practice.
 pub fn attack_system(
     mut events: MessageReader<AttackRequested>,
     mut attackers: Attackers,
     targets: AttackTargets,
     mut healths: Query<(&mut Health, Option<&Resistances>)>,
+    mut all_effects: Query<&mut ActiveEffects>,
 ) {
     let mut rng = rand::rng();
     for event in events.read() {
-        let Ok((attacker_pos, melee, attacker_stats, mut timer)) =
+        let Ok((attacker_pos, melee, attacker_stats, mut timer, attacker_is_player)) =
             attackers.get_mut(event.attacker)
         else {
             continue;
@@ -160,14 +195,15 @@ pub fn attack_system(
 
         let nearest = targets
             .iter()
-            .filter(|(entity, _)| *entity != event.attacker)
-            .filter(|(_, pos)| attacker_pos.distance(pos) <= melee.range)
-            .min_by(|(_, a), (_, b)| {
+            .filter(|(entity, _, _)| *entity != event.attacker)
+            .filter(|(_, _, target_is_player)| !(attacker_is_player && *target_is_player))
+            .filter(|(_, pos, _)| attacker_pos.distance(pos) <= melee.range)
+            .min_by(|(_, a, _), (_, b, _)| {
                 attacker_pos
                     .distance(a)
                     .total_cmp(&attacker_pos.distance(b))
             })
-            .map(|(entity, _)| entity);
+            .map(|(entity, _, _)| entity);
 
         let Some(target) = nearest else {
             continue;
@@ -176,15 +212,36 @@ pub fn attack_system(
         if let Ok((mut health, resistances)) = healths.get_mut(target) {
             let no_resistances = Resistances::default();
             let resistances = resistances.unwrap_or(&no_resistances);
+            let Ok([mut attacker_effects, mut target_effects]) =
+                all_effects.get_many_mut([event.attacker, target])
+            else {
+                continue;
+            };
+            let effective_stats = CombatStats {
+                crit_chance: attacker_stats.crit_chance
+                    + attacker_effects.stat_bonus(Stat::CritChance),
+                crit_multiplier: attacker_stats.crit_multiplier
+                    + attacker_effects.stat_bonus(Stat::CritMultiplier),
+            };
             let amount = resolve_damage(
                 melee.damage,
                 &melee.damage_type,
-                attacker_stats,
+                &effective_stats,
                 resistances,
                 &mut rng,
             );
             apply_damage(&mut health, amount);
             timer.0 = melee.cooldown;
+
+            for effect in &melee.effects {
+                if !rng.random_bool(effect.chance as f64) {
+                    continue;
+                }
+                match effect.applies_to {
+                    EffectTarget::Target => target_effects.apply(effect.clone()),
+                    EffectTarget::Attacker => attacker_effects.apply(effect.clone()),
+                }
+            }
         }
     }
 }
@@ -213,6 +270,7 @@ pub fn death_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status_effect::{EffectKind, StackMode};
     use bevy_ecs::system::RunSystemOnce;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
@@ -342,16 +400,22 @@ mod tests {
                     damage: 10.0,
                     cooldown: 1.0,
                     damage_type: primal(),
+                    effects: vec![],
                 },
                 CombatStats {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                 },
                 AttackTimer(0.0),
+                ActiveEffects::default(),
             ))
             .id();
         let near_target = world
-            .spawn((Position { x: 2.0, y: 0.0 }, Health::new(30.0)))
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
             .id();
         let far_target = world
             .spawn((Position { x: 100.0, y: 0.0 }, Health::new(30.0)))
@@ -368,6 +432,98 @@ mod tests {
         assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 1.0);
     }
 
+    fn daze(chance: f32) -> EffectDefinition {
+        EffectDefinition {
+            id: "daze".to_string(),
+            kind: EffectKind::Stun,
+            duration: 1.0,
+            magnitude: 0.0,
+            stack_mode: StackMode::RefreshDuration,
+            applies_to: EffectTarget::Target,
+            chance,
+        }
+    }
+
+    #[test]
+    fn attack_system_always_applies_a_guaranteed_effect() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![daze(1.0)],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 1.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert!(world.get::<ActiveEffects>(target).unwrap().is_stunned());
+    }
+
+    #[test]
+    fn attack_system_never_applies_a_zero_chance_effect() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![daze(0.0)],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 1.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert!(!world.get::<ActiveEffects>(target).unwrap().is_stunned());
+    }
+
     #[test]
     fn attack_system_ignores_requests_still_on_cooldown() {
         let mut world = World::new();
@@ -381,16 +537,22 @@ mod tests {
                     damage: 10.0,
                     cooldown: 1.0,
                     damage_type: primal(),
+                    effects: vec![],
                 },
                 CombatStats {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                 },
                 AttackTimer(0.4),
+                ActiveEffects::default(),
             ))
             .id();
         let target = world
-            .spawn((Position { x: 1.0, y: 0.0 }, Health::new(30.0)))
+            .spawn((
+                Position { x: 1.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
             .id();
 
         world
@@ -448,17 +610,23 @@ mod tests {
                     damage: 10.0,
                     cooldown: 1.0,
                     damage_type: primal(),
+                    effects: vec![],
                 },
                 CombatStats {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                 },
                 AttackTimer(0.0),
+                ActiveEffects::default(),
                 Downed,
             ))
             .id();
         let target = world
-            .spawn((Position { x: 1.0, y: 0.0 }, Health::new(30.0)))
+            .spawn((
+                Position { x: 1.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
             .id();
 
         world
@@ -483,12 +651,14 @@ mod tests {
                     damage: 10.0,
                     cooldown: 1.0,
                     damage_type: primal(),
+                    effects: vec![],
                 },
                 CombatStats {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                 },
                 AttackTimer(0.0),
+                ActiveEffects::default(),
             ))
             .id();
         world.spawn((Position { x: 1.0, y: 0.0 }, Health::new(30.0), Downed));
@@ -502,5 +672,97 @@ mod tests {
         // No eligible target in range means the attack never resolves, so
         // the attacker's cooldown never starts.
         assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 0.0);
+    }
+
+    #[test]
+    fn attack_system_prevents_player_on_player_damage() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Player,
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let teammate = world
+            .spawn((
+                Player,
+                Position { x: 1.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Health>(teammate).unwrap().current, 30.0);
+        assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 0.0);
+    }
+
+    #[test]
+    fn attack_system_still_hits_an_enemy_past_a_nearer_teammate() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Player,
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        // The teammate is nearer than the enemy but ineligible as a
+        // target — the enemy should still get selected and hit.
+        world.spawn((
+            Player,
+            Position { x: 0.5, y: 0.0 },
+            Health::new(30.0),
+            ActiveEffects::default(),
+        ));
+        let enemy = world
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Health>(enemy).unwrap().current, 20.0);
     }
 }
