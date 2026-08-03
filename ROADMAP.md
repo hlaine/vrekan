@@ -246,20 +246,63 @@ health when max changes needs its own care, not worth rushing into this
 pass just to add a rune type for it.
 
 ## M8 — UI: HUD & menus
-- [ ] egui HUD: health/resource (od), cooldowns, minimap, party status,
-  downed-state indicator
-- [ ] Inventory, skill tree, forging UI, vendor/shop UI — built alongside
-  M6/M7, not deferred wholesale to the end
-- [ ] Level-up / stat-allocation panel (manual stat points — see
-  `MECHANICS.md`)
+
+Part 1 (in progress — see `DECISIONS.md`'s M8 planning entry for the full
+design writeup):
+- [ ] `bevy_egui` added as a client-only dependency (named in `CLAUDE.md`'s
+  stack from the start; `=0.41.1`, verified compatible with the pinned
+  `bevy = "=0.19.0"`)
+- [ ] egui HUD: health/od bars, skill cooldowns (needs `AttackTimer`/
+  `SkillCooldowns` newly replicated — both were server-only until now),
+  downed-state indicator. Skill icons use the existing fixed `1`-`3`
+  hotkeys from M6, no new input model.
+- [ ] Inventory + equip/unequip panel — click-driven, replaces M7's
+  `F1`-`F6` hotkey stand-ins (removed once the panel exists, not kept
+  alongside it)
+- [ ] Level-up / stat-allocation panel (new `AllocateStatPointInput`
+  message — `UnspentStatPoints` has had nowhere to go since M5) and a
+  skill-learning panel (new `LearnSkillInput` message — same gap for
+  `UnspentSkillPoints`/`KnownSkills` since M6). Flat spend-a-point list,
+  no prerequisite tree topology — nothing in `MECHANICS.md`/`DESIGN.md`
+  specifies an actual tree shape.
+- [ ] Generic `Interactable` system (`game_core::interact`): proximity +
+  action button (`E`, same key as pickup — checks interactables first,
+  falls back to nearest item drop) triggers a replicated dialog and/or a
+  server-resolved effect grant and/or opens a named client panel. Pulls
+  forward part of M9's "special-character dialog" mechanism by necessity;
+  only the generic trigger, not M9's actual objective content.
+- [ ] Forging UI, triggered by a blacksmith-kind `Interactable` — sockets/
+  unsockets now require being in range of that NPC (a real behavior
+  change from M7's free-anywhere hotkey socketing), not a separate
+  "custom system" screen
+- [ ] Interactables (blacksmith, runestones) placed via a new Tiled object
+  layer in `assets/maps/valley.tmx` (named point objects, read the same
+  way `spawn_map_colliders` already reads the collision layer) — the map
+  is the source of truth for placement, not a hardcoded spawn constant.
+  Hand-edited into the TMX for now since the user doesn't have the Tiled
+  editor installed yet.
+
+Deferred (see `DECISIONS.md` for why — blocked on weapon-driven combat
+stats not existing yet, not a UI-only gap):
+- [ ] `TAB`-style toggle-through skill/attack selector, dedicated
+  per-attack hotkeys, primary/secondary weapon slots
+- [ ] Vendor/shop UI (blocked on M7 part 2's vendor economy, which
+  doesn't exist yet)
 - [ ] Player skin preset selection; equipped armor/helmet renders visually
-  (full per-item outfit changes — see `MECHANICS.md`)
+  (full per-item outfit changes — see `MECHANICS.md`). Blocked on actual
+  art assets, not just code — everything's solid-color placeholder
+  sprites today.
+- [ ] Minimap, full party status detail
 
 ## M9 — Objectives & first dungeon content
 - [ ] Hand-authored dungeon instance, entered explicitly from the overworld
 - [ ] One full objective sequence, tier-1 enemies only
 - [ ] Special-character dialog: one-way objective/flavor text, no branching
-  — see `MECHANICS.md`
+  — see `MECHANICS.md`. The generic trigger mechanism (`game_core::interact`'s
+  `Interactable`) lands in M8 for the blacksmith/runestone case — this
+  bullet is about the actual objective-granting *content*, not the
+  mechanism, which already exists by the time M9 starts. See `DECISIONS.md`'s
+  M8 planning entry.
 - [ ] Neutral (unkillable) character type
 - [ ] Boss mechanics: phases, enrage timer, arena bounds — see
   `MECHANICS.md`; first boss encounter as part of this dungeon

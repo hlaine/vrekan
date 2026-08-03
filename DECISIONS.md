@@ -973,3 +973,121 @@ world-visible entity (not just mutate/despawn an existing one) will hit
 the same `Replicated`-insertion gap and needs the same "server reacts to
 `Added<T>` a moment later" fix, not an attempt to give `game_core` a
 `bevy_replicon` dependency.
+
+---
+
+## M8 planning: a generic interact system, Tiled-authored placement, and what's deliberately deferred
+
+**Context:** Planning M8 (UI: HUD & menus) surfaced more ground than the
+roadmap bullets alone suggested — the user wants NPCs (blacksmith, sage)
+and world objects (runestones) that trigger dialogs, effects, or panels on
+interaction, not just static HUD/inventory screens. Worked through several
+design questions with the user before writing any code; this entry
+records the resulting decisions plus the concrete Bevy/`tiled` findings
+implementation needs to know about.
+
+**Decision — one generic `Interactable` concept, not one-off logic per
+object type.** A runestone (dialog + effect), a blacksmith (opens the
+forging panel), and a future objective-giving NPC (M9) are all the same
+underlying shape: proximity + an action-button press triggers *something*.
+Modeled as `Interactable { range, dialog: Option<String>, effect:
+Option<EffectDefinition>, opens_panel: Option<String> }`. This pulls
+forward part of M9's "special-character dialog" bullet by necessity (the
+blacksmith needs a trigger mechanism regardless), but only the generic
+mechanism — the actual *content* (objective triggers, boss-completion
+hooks) stays M9's job, added later using the same component.
+
+**Decision — dialog text is replicated data, read locally; only the
+effect grant is a server round-trip.** `Interactable` (including its
+`dialog` field) replicates like any other content-key-adjacent component,
+so the client can show dialog text the instant the action button is
+pressed, no round-trip needed for something purely informational. The
+`effect` grant, if any, still goes through a server-resolved
+`InteractRequested` — anything that mutates game state stays
+server-authoritative, matching every other action system in this project.
+
+**Decision — one action button (`E`) does double duty**, confirmed with
+the user: it checks for the nearest `Interactable` in range first, falling
+back to the nearest `ItemDrop` (pickup) if none is in range. One button to
+learn, a clear priority rule, no separate "interact" key needed alongside
+`PickupItemInput`'s existing `E` binding.
+
+**Decision — forging becomes NPC-gated, a real behavior change from what
+M7 shipped.** Confirmed with the user: socketing/unsocketing now requires
+being in range of a blacksmith-kind `Interactable` (`opens_panel ==
+Some("forging")`), not free-from-anywhere-via-hotkey like M7's stand-in.
+`apply_socket_rune_input`/`apply_unsocket_rune_input` need a new
+server-side proximity check against that specific `Interactable`, not just
+against a plain range constant.
+
+**Decision — Interactable placement is authored in the Tiled map, not a
+hardcoded Rust position constant.** Raised directly by the user: a fixed
+`SPAWN_BASE + spacing` constant (the pattern `spawn_enemies` already uses)
+would disconnect placement from the actual level layout they're
+designing — no way to put a blacksmith in a specific village square short
+of guessing coordinates. Instead: a new "interactables" object layer in
+`assets/maps/valley.tmx`, read the same way `spawn_map_colliders` already
+reads the "collision" layer (see `server::spawn_map_colliders`), matching
+each named point object against a `content::InteractableTemplate` key —
+same convention as `EnemyKind`. **Found via source inspection, not
+assumed:** the `tiled` crate (already pinned at `=0.16.0`, already a
+dependency for collision) supports exactly this —
+`~/.cargo/registry/.../tiled-0.16.0/src/objects.rs`'s `ObjectData` has a
+`name: String` field and `x`/`y`, and `ObjectShape::Point(x, y)` exists
+alongside the `Polygon` shape `spawn_map_colliders` already reads. The
+user doesn't have the Tiled editor installed yet, so these object-layer
+edits go directly into the TMX (plain XML) by hand for this pass, not
+placed via the GUI.
+
+**Decision — `bevy_egui` added as a client-only dependency.** Named in
+`CLAUDE.md`'s stack from the start ("UI: egui via bevy_egui"), so this
+isn't a new choice, just the point where it actually gets added. **Found,
+not assumed:** `cargo add bevy_egui --dry-run` inside `client/` resolves
+`bevy_egui v0.41.1` cleanly against the workspace's pinned `bevy = "=0.19.0"`
+— verified this way instead of guessing a version or web-searching.
+`bevy_egui`'s exact `wants_pointer_input`/`wants_keyboard_input`-equivalent
+API on 0.41 hasn't been checked yet — implementation needs to verify the
+real method names before wiring up the input-focus guard described below,
+not assume they match older bevy_egui versions' API.
+
+**Decision — skill tree is a flat spend-a-point list, no prerequisite
+tree topology.** Neither `MECHANICS.md` nor `DESIGN.md` describes an
+actual tree shape ("skill tree" is the roadmap's naming, not a confirmed
+structure) — building prerequisite/branching logic now would be designing
+for a shape nobody has actually decided on yet.
+
+**Decision — `AttackTimer`/`SkillCooldowns` become replicated this pass.**
+Both were server-only up to now (nothing needed them client-side). The
+HUD showing real cooldown countdowns needs them on the client, so both
+gain `Serialize`/`Deserialize` and a `.replicate::<T>()` registration.
+
+**Decision — M7's UI-stand-in hotkeys (`F1`-`F9`) get removed once the
+real panels exist**, not kept as a parallel shortcut path — two ways to
+trigger the same equip/socket action would drift out of sync over time
+for no real benefit. `WASD`/`Space`/`F` (revive)/`1`-`3` (skills) are
+real-time combat actions and stay exactly as they are; per `CLAUDE.md`,
+menus are overlays, not pauses, so none of these ever get suppressed just
+because a panel is open.
+
+**Explicitly deferred, with the reason recorded so it isn't re-litigated
+later:** a `TAB`-style toggle-through skill selector, dedicated
+per-attack hotkeys (e.g. slice/cleave/thrust), and dual primary/secondary
+weapon slots. The user raised these, and the honest assessment (agreed
+with the user) is that they're blocked on something more fundamental than
+UI: **equipped weapons currently carry no combat-stat data at all.**
+`ItemTemplate` only has `slot`/`socket_count`; `MeleeAttack`
+(damage/range/cooldown) is a fixed constant set once at player spawn,
+completely independent of what's equipped — a socketed rune changes crit/
+speed, but swapping the weapon itself currently changes nothing
+mechanically. Weapon-swap hotkeys are meaningless until weapons actually
+drive `MeleeAttack`, which needs its own deliberate pass (new
+`ItemTemplate` combat fields, `MeleeAttack` derived from `Equipment`
+instead of a spawn-time constant) once weapon variety is actually
+designed — not guessed at now alongside four new UI panels. M8 part 1's
+skill HUD instead just shows icons for known skills next to the existing
+fixed `1`-`3` keys, which needs none of this.
+
+**Consequences:** When weapon-driven combat stats and a real moveset
+design exist, revisit `Equipment`/`EquipSlot` for a second weapon slot and
+the hotbar/toggle input model then — don't add either speculatively
+before that prerequisite work happens.
