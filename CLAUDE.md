@@ -17,9 +17,10 @@ Priorities, in order:
 Stack: **Rust + Bevy (ECS)**. Networking: **bevy_replicon**. UI: **egui via
 bevy_egui**. Content data: **RON**.
 
-See `DESIGN.md` for game design context and `ROADMAP.md` for the milestone
-sequence — check `ROADMAP.md` before starting work to confirm what's next and
-what's explicitly out of scope for the current milestone.
+See `DESIGN.md` for game design context, `MECHANICS.md` for combat/progression
+system shapes, and `ROADMAP.md` for the milestone sequence — check
+`ROADMAP.md` before starting work to confirm what's next and what's
+explicitly out of scope for the current milestone.
 
 ## Architecture
 

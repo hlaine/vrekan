@@ -28,8 +28,10 @@ Real-time, direct movement (WASD/stick) with aimed abilities — dodge-focused, 
 click-to-move. Player roams an open overworld with continuously respawning
 enemies, and enters explicit dungeon instances to complete objectives. The core
 drive is grinding loot, levels, and upgrades to take on progressively stronger
-enemies. No trading — the only way to give another player an item is to drop it
-for them in co-op.
+enemies. Player-to-player trading is out of scope — the only way to give
+another player an item directly is to drop it for them in co-op. NPC vendors
+(buy/sell, individual currency per player) are a separate, in-scope system —
+see `MECHANICS.md`.
 
 ## World & session structure
 
@@ -43,6 +45,30 @@ for them in co-op.
   contained instances, not part of the continuous overworld.
 - **Only the player's character persists** across sessions: level, stats, items,
   skills. Save architecture specifics are an open question (see below).
+
+## Camera & movement
+
+- **Shared camera per client.** Each client's camera is driven by *all* party
+  members' positions (already replicated via networking from M3), not just
+  the local player — centered on the party's midpoint, zooming out as the
+  party spreads apart and back in as they regroup. Both clients see a
+  consistent, synchronized-feeling view without needing any new networking
+  beyond what's already replicated.
+- **Hard leash, server-authoritative.** Players cannot move further apart than
+  the camera's max zoom allows — an invisible boundary enforced in the
+  server's movement resolution (`game_core`), not a client-side cosmetic
+  clamp. A client-side-only leash would be both cheatable and a desync risk;
+  the server is the source of truth here exactly as it is for all other
+  simulation state. The client adds a lightweight visual indicator when at
+  the limit.
+- **Movement/collision is purely 2D.** Elevation (mountains, hills) is
+  cosmetic only — no climbing, no verticality in gameplay. What determines
+  passability is the collision layer, not visual height; terrain that reads
+  as elevated can still be walkable or blocking independent of how it looks.
+- **Collision authoring: freeform polygon colliders**, not a rigid tile grid
+  — chosen for natural-looking terrain silhouettes (a valley should read as
+  a genuine narrow pass between mountains, not a staircase of grid tiles).
+  Authored in Tiled alongside the visual tileset.
 
 ## Multiplayer scope
 
@@ -112,7 +138,9 @@ significant system on its own and shouldn't block getting the core loop working.
 ## Explicitly out of scope (v1)
 
 - Cutscenes, branching dialogue, story choices
-- Trading (only direct item drop between co-op players)
+- Player-to-player trading (direct item drop between co-op players is still
+  the only way to give someone an item person-to-person; NPC vendor buy/sell
+  is a separate, in-scope system — see `MECHANICS.md`)
 - PvP
 - Persistent/shared world across parties
 - Procedural dungeon generation

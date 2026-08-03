@@ -27,32 +27,72 @@ Claude Code tasks as you start it, not all upfront.
 - [x] bevy_replicon wired up: position replication for a moving entity
 - [x] Two clients connect to one local server, see each other move
 
+## M3.5 — Shared camera, leash, and map collision
+- [ ] Camera driven by party centroid (both clients), zoom scales with party
+  spread — see `DESIGN.md`'s Camera & movement section
+- [ ] Hard leash: players can't exceed the camera's max spread, plus a
+  lightweight visual indicator at the limit (not the real HUD, that's M8)
+- [ ] Map collision: `bevy_ecs_tiled` (parses Tiled maps, auto-spawns physics
+  colliders from object layers) + `avian2d` as the physics backend — freeform
+  polygon colliders authored in Tiled, a first test map with a valley-style
+  narrow pass between blocking mountain shapes. Both are new external
+  dependencies per `CLAUDE.md`'s review rule — flagged and confirmed.
+- [ ] First real camera system — M1 only ever spawned a static `Camera2d` at
+  the origin, so this isn't a replacement of prior follow-camera behavior
+
 ## M4 — Combat & damage type system, networked
 - [ ] `DamageType` + resistance system from `game_core`, server-authoritative
+  — see `MECHANICS.md` for the damage/crit formula shape
 - [ ] Combat (melee attack from M1) works correctly across client/server
-- [ ] Enemy death, respawn on the overworld
+- [ ] Generic status-effect system (stun, bleed, buffs — stackable,
+  duration-based, attachable to any attack via data)
+- [ ] Enemy death; player death → "downed" state (not respawn) — see
+  `MECHANICS.md` for the downed/revive/wipe rules
+- [ ] Ally-revive: teammate walks to a downed player and presses an action
+  button to revive them
 
 ## M5 — Progression: leveling & stats
-- [ ] XP, character level, stat growth
+- [ ] XP, character level, manual stat point allocation on level up — see
+  `MECHANICS.md` for the formula shape
+- [ ] XP penalty on individual death; full-party-wipe resets in-level
+  progress to zero (level itself never drops) — see `MECHANICS.md`
+- [ ] Resurrection-point checkpointing (auto-updates at dungeon entry /
+  objectives); full-wipe auto-respawn there
 - [ ] Server-authoritative, persisted per character (save format TBD)
 
 ## M6 — Skills
 - [ ] Skill acquisition and upgrade, data-driven like enemies/items
 - [ ] At least 2-3 skills with distinct mechanical behavior
+- [ ] "Öd" resource (regen + combat/action-generated), power attacks that
+  consume it — see `MECHANICS.md`
 
 ## M7 — Items & forging
 - [ ] Item drops, pickup, equip
 - [ ] Affix/forging system (the "custom system" from `DESIGN.md`)
 - [ ] Loot tables tied to enemy tiers
+- [ ] Vendor buy/sell economy, individual currency per player — see
+  `MECHANICS.md`
+- [ ] Enemy visual-variant data shape (shared base template + swappable
+  sprite field) — see `MECHANICS.md`
 
 ## M8 — UI: HUD & menus
-- [ ] egui HUD: health/resource, cooldowns, minimap, party status
-- [ ] Inventory, skill tree, forging UI — built alongside M6/M7, not deferred
-  wholesale to the end
+- [ ] egui HUD: health/resource (öd), cooldowns, minimap, party status,
+  downed-state indicator
+- [ ] Inventory, skill tree, forging UI, vendor/shop UI — built alongside
+  M6/M7, not deferred wholesale to the end
+- [ ] Level-up / stat-allocation panel (manual stat points — see
+  `MECHANICS.md`)
+- [ ] Player skin preset selection; equipped armor/helmet renders visually
+  (full per-item outfit changes — see `MECHANICS.md`)
 
 ## M9 — Objectives & first dungeon content
 - [ ] Hand-authored dungeon instance, entered explicitly from the overworld
 - [ ] One full objective sequence, tier-1 enemies only
+- [ ] Special-character dialog: one-way objective/flavor text, no branching
+  — see `MECHANICS.md`
+- [ ] Neutral (unkillable) character type
+- [ ] Boss mechanics: phases, enrage timer, arena bounds — see
+  `MECHANICS.md`; first boss encounter as part of this dungeon
 
 ## M10 — Polish pass
 - [ ] Splash/title screen
