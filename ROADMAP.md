@@ -248,39 +248,79 @@ pass just to add a rune type for it.
 ## M8 — UI: HUD & menus
 
 Part 1 (in progress — see `DECISIONS.md`'s M8 planning entry for the full
-design writeup):
-- [ ] `bevy_egui` added as a client-only dependency (named in `CLAUDE.md`'s
+design writeup). Numbered here by practical build order, not importance —
+later steps depend on earlier ones landing first; a review pass before
+starting found two gaps folded in below (marked "found via review").
+
+1. [ ] `bevy_egui` added as a client-only dependency (named in `CLAUDE.md`'s
   stack from the start; `=0.41.1`, verified compatible with the pinned
   `bevy = "=0.19.0"`)
-- [ ] egui HUD: health/od bars, skill cooldowns (needs `AttackTimer`/
-  `SkillCooldowns` newly replicated — both were server-only until now),
-  downed-state indicator. Skill icons use the existing fixed `1`-`3`
-  hotkeys from M6, no new input model.
-- [ ] Inventory + equip/unequip panel — click-driven, replaces M7's
+2. [ ] Backend prep, no UI yet — makes the panels below meaningful the
+  moment they exist instead of needing a follow-up fix:
+   - Wire `Stats`' `bonus_move_speed`/`bonus_crit_chance`/
+     `bonus_crit_multiplier` into combat/movement resolution, the same
+     additive-at-point-of-use way `Equipment`'s bonuses already are.
+     `bonus_max_health` stays deferred, same reason as item-based
+     max-health bonuses: safely rescaling current health when max
+     changes needs its own care. **Found via review:** `Stats`' bonus
+     fields were completely unread anywhere in the codebase before this —
+     the stat-allocation panel below would otherwise let a player spend
+     points for zero gameplay effect, the exact gap M7 deliberately
+     avoided for item/rune bonuses.
+   - Replicate `AttackTimer`/`SkillCooldowns` (both server-only until
+     now) so the HUD can show real cooldown countdowns.
+3. [ ] egui HUD: health/od bars, skill cooldowns, downed-state indicator.
+  Skill icons use the existing fixed `1`-`3` hotkeys from M6, no new
+  input model. Read-only — first panel, no input-focus handling needed
+  yet.
+4. [ ] Input-focus guard (an `egui` pointer/keyboard-capture check —
+  exact `bevy_egui` 0.41 method names to confirm during implementation),
+  added alongside the first *interactive* panel next. Per `CLAUDE.md`,
+  opening a panel never suppresses `WASD`/`Space`/`F`/`1`-`3` — it only
+  stops a panel click from also being read as game input.
+5. [ ] Inventory + equip/unequip panel — click-driven, replaces M7's
   `F1`-`F6` hotkey stand-ins (removed once the panel exists, not kept
   alongside it)
-- [ ] Level-up / stat-allocation panel (new `AllocateStatPointInput`
+6. [ ] Level-up / stat-allocation panel (new `AllocateStatPointInput`
   message — `UnspentStatPoints` has had nowhere to go since M5) and a
   skill-learning panel (new `LearnSkillInput` message — same gap for
-  `UnspentSkillPoints`/`KnownSkills` since M6). Flat spend-a-point list,
-  no prerequisite tree topology — nothing in `MECHANICS.md`/`DESIGN.md`
-  specifies an actual tree shape.
-- [ ] Generic `Interactable` system (`game_core::interact`): proximity +
+  `UnspentSkillPoints`/`KnownSkills` since M6). Meaningful from the
+  moment it exists since step 2 already wired the bonuses in. Flat
+  spend-a-point list, no prerequisite tree topology — nothing in
+  `MECHANICS.md`/`DESIGN.md` specifies an actual tree shape.
+7. [ ] Generic `Interactable` system (`game_core::interact`): proximity +
   action button (`E`, same key as pickup — checks interactables first,
-  falls back to nearest item drop) triggers a replicated dialog and/or a
-  server-resolved effect grant and/or opens a named client panel. Pulls
-  forward part of M9's "special-character dialog" mechanism by necessity;
-  only the generic trigger, not M9's actual objective content.
-- [ ] Forging UI, triggered by a blacksmith-kind `Interactable` — sockets/
-  unsockets now require being in range of that NPC (a real behavior
-  change from M7's free-anywhere hotkey socketing), not a separate
-  "custom system" screen
-- [ ] Interactables (blacksmith, runestones) placed via a new Tiled object
-  layer in `assets/maps/valley.tmx` (named point objects, read the same
-  way `spawn_map_colliders` already reads the collision layer) — the map
-  is the source of truth for placement, not a hardcoded spawn constant.
-  Hand-edited into the TMX for now since the user doesn't have the Tiled
-  editor installed yet.
+  falls back to nearest item drop). **Corrected via review:** replicates
+  as `Interactable { template_key: String, range: f32 }` only — the same
+  "replicate a content-template key, not template data" pattern as
+  `EnemyKind`, not an embedded `EffectDefinition` (which doesn't derive
+  `Serialize`/`Deserialize` and is otherwise server-only). The client
+  loads `InteractableTemplate`s locally for dialog text (same pattern as
+  `EnemyTemplates`); the server resolves any effect grant via a new
+  `InteractableLibrary` lookup, applied unconditionally to the
+  interacting player (`EffectDefinition::applies_to` doesn't apply here
+  — there's no "attacker"). Pulls forward part of M9's "special-character
+  dialog" mechanism by necessity; only the generic trigger, not M9's
+  actual objective content.
+8. [ ] Interactables (blacksmith, runestones) placed via a new Tiled
+  object layer in `assets/maps/valley.tmx` (named point objects, read
+  the same way `spawn_map_colliders` already reads the collision layer)
+  — the map is the source of truth for placement, not a hardcoded spawn
+  constant. Hand-edited into the TMX for now since the user doesn't have
+  the Tiled editor installed yet. No explicit "Neutral" marker needed
+  (confirmed via review): not giving these entities a `Health` component
+  already excludes them from every combat-targeting query (`ai_system`
+  only ever targets `With<Player>`; melee/skill targeting requires
+  `With<Health>`).
+9. [ ] Dialog panel (generic text window) for runestone-style
+  interactions — the simpler of the two interaction outcomes, built
+  first to validate the whole `Interactable` pipeline end-to-end before
+  adding forging's extra gating logic below.
+10. [ ] Forging UI, triggered by a blacksmith-kind `Interactable` —
+  sockets/unsockets now require being in range of that specific NPC (a
+  real behavior change from M7's free-anywhere hotkey socketing);
+  `apply_socket_rune_input`/`apply_unsocket_rune_input` gain a
+  server-side proximity check, not just a plain range constant.
 
 Deferred (see `DECISIONS.md` for why — blocked on weapon-driven combat
 stats not existing yet, not a UI-only gap):

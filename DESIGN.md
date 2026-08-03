@@ -47,7 +47,10 @@ see `MECHANICS.md`.
 - **Dungeons are entered explicitly** for specific objectives/tasks — self-
   contained instances, not part of the continuous overworld.
 - **Only the player's character persists** across sessions: level, stats, items,
-  skills. Save architecture specifics are an open question (see below).
+  skills. Save architecture resolved in M5 — server-authoritative RON files
+  under `saves/<game_id>/`, one server process per game, client-generated
+  character ID + game/character passwords — see `DECISIONS.md`'s
+  identity-model entry.
 
 ## Camera & movement
 
@@ -164,7 +167,5 @@ significant system on its own and shouldn't block getting the core loop working.
 
 - Is the game completable (a final boss = win state) or endless/infinite
   scaling? Doesn't block v1 systems work either way.
-- Save architecture: server-authoritative vs. client-side, account/character
-  identity model.
 - Whether damage-type resistances are exposed as visible player-facing stats or
   stay mostly under the hood.
