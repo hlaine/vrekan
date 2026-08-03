@@ -13,3 +13,5 @@ bevy_replicon_renet = { workspace = true }
 content = { path = "../content" }
 game_core = { path = "../game_core" }
 protocol = { path = "../protocol" }
+ron = { workspace = true }
+serde = { workspace = true }

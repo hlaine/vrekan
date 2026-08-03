@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::movement::Position;
 use crate::player::{Downed, Player};
+use crate::progression::{grant_xp, Level, UnspentStatPoints, XpReward};
 use crate::status_effect::{ActiveEffects, EffectDefinition, EffectTarget, Stat, Stunned};
 use crate::DeltaSeconds;
 
@@ -125,7 +126,9 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
     }
 }
 
-/// A downed or stunned entity can't attack — see `attack_system`.
+/// A downed or stunned entity can't attack — see `attack_system`. The
+/// `Level`/`UnspentStatPoints` pair is `Option` since only players have
+/// them — used to grant XP on a killing blow, see `attack_system`.
 type Attackers<'w, 's> = Query<
     'w,
     's,
@@ -135,6 +138,8 @@ type Attackers<'w, 's> = Query<
         &'static CombatStats,
         &'static mut AttackTimer,
         Has<Player>,
+        Option<&'static mut Level>,
+        Option<&'static mut UnspentStatPoints>,
     ),
     (Without<Downed>, Without<Stunned>),
 >;
@@ -175,17 +180,30 @@ type AttackTargets<'w, 's> =
 /// query-conflict check is structural, not runtime-aware: two separate
 /// `Query` params both mutably touching the same component type panics as
 /// unsound even though these two never alias in practice.
+///
+/// A killing blow grants the target's `XpReward` (if any) to the attacker
+/// via `grant_xp`, but only if the attacker has `Level` — i.e. is a player;
+/// enemies have no use for XP. Killing-blow-only credit, not shared across
+/// the party (see MECHANICS.md's Progression section — a starting rule,
+/// not a settled one).
 pub fn attack_system(
     mut events: MessageReader<AttackRequested>,
     mut attackers: Attackers,
     targets: AttackTargets,
-    mut healths: Query<(&mut Health, Option<&Resistances>)>,
+    mut healths: Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     mut all_effects: Query<&mut ActiveEffects>,
 ) {
     let mut rng = rand::rng();
     for event in events.read() {
-        let Ok((attacker_pos, melee, attacker_stats, mut timer, attacker_is_player)) =
-            attackers.get_mut(event.attacker)
+        let Ok((
+            attacker_pos,
+            melee,
+            attacker_stats,
+            mut timer,
+            attacker_is_player,
+            attacker_level,
+            attacker_points,
+        )) = attackers.get_mut(event.attacker)
         else {
             continue;
         };
@@ -209,7 +227,7 @@ pub fn attack_system(
             continue;
         };
 
-        if let Ok((mut health, resistances)) = healths.get_mut(target) {
+        if let Ok((mut health, resistances, xp_reward)) = healths.get_mut(target) {
             let no_resistances = Resistances::default();
             let resistances = resistances.unwrap_or(&no_resistances);
             let Ok([mut attacker_effects, mut target_effects]) =
@@ -232,6 +250,14 @@ pub fn attack_system(
             );
             apply_damage(&mut health, amount);
             timer.0 = melee.cooldown;
+
+            if health.is_dead() {
+                if let (Some(xp_reward), Some(mut level), Some(mut points)) =
+                    (xp_reward, attacker_level, attacker_points)
+                {
+                    grant_xp(&mut level, &mut points, xp_reward.0);
+                }
+            }
 
             for effect in &melee.effects {
                 if !rng.random_bool(effect.chance as f64) {
@@ -430,6 +456,90 @@ mod tests {
         assert_eq!(world.get::<Health>(near_target).unwrap().current, 20.0);
         assert_eq!(world.get::<Health>(far_target).unwrap().current, 30.0);
         assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 1.0);
+    }
+
+    #[test]
+    fn attack_system_grants_xp_to_attacker_on_killing_blow() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Player,
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+                Level::default(),
+                UnspentStatPoints::default(),
+            ))
+            .id();
+        world.spawn((
+            Position { x: 1.0, y: 0.0 },
+            Health::new(5.0),
+            ActiveEffects::default(),
+            XpReward(50.0),
+        ));
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Level>(attacker).unwrap().xp, 50.0);
+    }
+
+    #[test]
+    fn attack_system_does_not_grant_xp_when_hit_is_not_lethal() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Player,
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+                Level::default(),
+                UnspentStatPoints::default(),
+            ))
+            .id();
+        world.spawn((
+            Position { x: 1.0, y: 0.0 },
+            Health::new(30.0),
+            ActiveEffects::default(),
+            XpReward(50.0),
+        ));
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Level>(attacker).unwrap().xp, 0.0);
     }
 
     fn daze(chance: f32) -> EffectDefinition {

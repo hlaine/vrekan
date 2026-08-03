@@ -1,3 +1,5 @@
+use std::fs;
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::time::SystemTime;
@@ -17,7 +19,9 @@ use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, Facing, Stunned, LEASH_DISTANCE};
-use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
+use protocol::{
+    AttackInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT,
+};
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
 const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
@@ -58,6 +62,15 @@ const STUNNED_COLOR: Color = Color::srgb(0.9, 0.85, 0.2);
 // units) so it reads as "pointing off the sprite," not lost inside it.
 const FACING_ARROW_LENGTH: f32 = 24.0;
 const FACING_ARROW_COLOR: Color = Color::WHITE;
+
+// This client's persistent character identity, generated once and reused
+// across runs — not tied to any account system (see DECISIONS.md's
+// identity-model entry). Relative to CWD, matching the project's existing
+// "run from repo root" convention for asset/content paths. Overridable via
+// a CLI arg (`cargo run -p client -- other_id.txt`) — running two clients
+// from the same directory for local co-op testing would otherwise have
+// both read/generate the exact same file and collide as one character.
+const CHARACTER_ID_PATH: &str = "character_id.txt";
 
 /// Marks a replicated player entity that isn't ours — rendered, but not a
 /// target for our local AI/attack systems (`game_core::Player` is reserved
@@ -138,6 +151,34 @@ fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(EnemyTemplates(templates));
 }
 
+/// Loads this client's persistent character ID from the given path
+/// (`CHARACTER_ID_PATH`, or the first CLI arg if given — see its doc
+/// comment), or generates and saves a new random one if the file is
+/// missing or unreadable as a `u128`.
+fn load_or_create_character_id(path: &str) -> u128 {
+    if let Ok(contents) = fs::read_to_string(path) {
+        if let Ok(id) = contents.trim().parse() {
+            return id;
+        }
+    }
+    let id: u128 = rand::random();
+    fs::write(path, id.to_string())
+        .unwrap_or_else(|error| panic!("failed to save character id to {path}: {error}"));
+    id
+}
+
+/// Blocking terminal prompt — the closest non-UI stand-in for "enter a
+/// password" until M8 builds a real menu (see DECISIONS.md's
+/// identity-model entry); the game/character password isn't remembered
+/// client-side, so this runs every connection attempt.
+fn prompt(label: &str) -> String {
+    print!("{label}: ");
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    let _ = io::stdin().read_line(&mut input);
+    input.trim().to_string()
+}
+
 fn connect_to_server(mut commands: Commands, channels: Res<RepliconChannels>) -> Result<()> {
     let server_channels_config = channels.server_configs();
     let client_channels_config = channels.client_configs();
@@ -148,6 +189,18 @@ fn connect_to_server(mut commands: Commands, channels: Res<RepliconChannels>) ->
         ..Default::default()
     });
 
+    let character_id_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| CHARACTER_ID_PATH.to_string());
+    let character_id = load_or_create_character_id(&character_id_path);
+    println!("Character ID: {character_id}");
+    let auth = ConnectAuth {
+        game_password: prompt("Game password"),
+        character_id,
+        character_password: prompt("Character password"),
+    };
+    let user_data = auth.encode()?;
+
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let client_id = current_time.as_millis() as u64;
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), SERVER_PORT);
@@ -156,7 +209,7 @@ fn connect_to_server(mut commands: Commands, channels: Res<RepliconChannels>) ->
         client_id,
         protocol_id: PROTOCOL_ID,
         server_addr,
-        user_data: None,
+        user_data: Some(user_data),
     };
     let transport = NetcodeClientTransport::new(current_time, authentication, socket)?;
 

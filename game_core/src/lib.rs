@@ -2,6 +2,7 @@ pub mod combat;
 pub mod enemy;
 pub mod movement;
 pub mod player;
+pub mod progression;
 pub mod revive;
 pub mod status_effect;
 
@@ -11,6 +12,7 @@ pub use combat::{
 pub use enemy::{Aggro, Enemy, EnemyKind};
 pub use movement::{leash_system, Facing, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
 pub use player::{Downed, Player};
+pub use progression::{grant_xp, xp_required, Level, Stats, UnspentStatPoints, XpReward};
 pub use revive::{revive_system, Reviving};
 pub use status_effect::{
     tick_status_effects, ActiveEffects, EffectDefinition, EffectKind, EffectTarget, StackMode,

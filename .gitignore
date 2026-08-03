@@ -16,3 +16,8 @@
 .idea/
 .vscode/
 *.swp
+
+# Runtime-generated save data and client identity — see server/src/persistence.rs
+# and client/src/main.rs's load_or_create_character_id.
+/saves/
+character_id.txt

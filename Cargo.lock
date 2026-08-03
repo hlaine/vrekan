@@ -2271,6 +2271,7 @@ dependencies = [
  "content",
  "game_core",
  "protocol",
+ "rand",
 ]
 
 [[package]]
@@ -4974,6 +4975,7 @@ dependencies = [
  "bevy_ecs",
  "bevy_replicon",
  "game_core",
+ "ron",
  "serde",
 ]
 
@@ -5478,6 +5480,8 @@ dependencies = [
  "content",
  "game_core",
  "protocol",
+ "ron",
+ "serde",
  "tiled",
 ]
 

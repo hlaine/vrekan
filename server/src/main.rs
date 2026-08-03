@@ -1,3 +1,6 @@
+mod persistence;
+
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -11,6 +14,7 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy_replicon::prelude::*;
+use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::{
     netcode::{NetcodeServerTransport, ServerAuthentication, ServerConfig},
     renet::ConnectionConfig,
@@ -25,10 +29,12 @@ use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
     revive_system, tick_status_effects, ActiveEffects, DeltaSeconds, Downed, EffectDefinition,
-    EffectKind, EffectTarget, Enemy, Facing, MoveSpeed, Player, Position, Reviving, StackMode,
-    Stat, Stunned, Velocity,
+    EffectKind, EffectTarget, Enemy, Facing, Level, MoveSpeed, Player, Position, Reviving,
+    StackMode, Stat, Stats, Stunned, UnspentStatPoints, Velocity,
 };
-use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
+use protocol::{
+    AttackInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT,
+};
 
 const PLAYER_SPEED: f32 = 200.0;
 const PLAYER_COLLIDER_RADIUS: f32 = 16.0;
@@ -63,7 +69,50 @@ const ENEMY_SPAWN_BASE: Position = Position {
 };
 const ENEMY_SPAWN_SPACING: f32 = 150.0;
 
+/// Save files live under `saves/<game_id>/` — see `persistence`. One server
+/// process is one game (see DECISIONS.md), so this is a directory
+/// namespace, not a lookup across multiple simultaneous games.
+const SAVES_DIR: &str = "saves";
+
+/// Which save directory this server instance reads/writes — the first CLI
+/// argument, or `"default"` if none given (`cargo run -p server --
+/// my_game`). Purely a server-side launch concern: the client never sees
+/// or supplies this, since one server process already is one game from a
+/// connecting client's point of view (see DECISIONS.md's identity-model
+/// entry for why a client-facing "game ID" was scoped out of this pass).
+#[derive(Resource, Clone)]
+struct GameId(String);
+
+/// The game's shared password, checked against a connecting client's
+/// `ConnectAuth::game_password`. `None` until the very first successful
+/// connection, which claims whatever password it supplied as canonical
+/// (see `on_client_connected`).
+#[derive(Resource, Default)]
+struct GamePassword(Option<String>);
+
+/// Currently-connected character IDs, keyed to their entity — used to
+/// reject a second simultaneous connection for the same character (see
+/// `on_client_connected`) and to look up who to save on disconnect (see
+/// `on_character_disconnected`).
+#[derive(Resource, Default)]
+struct ActiveCharacters(HashMap<u128, Entity>);
+
+/// This connection's persistent character identity — server-only, not
+/// replicated (no one else needs it). See DECISIONS.md's identity-model
+/// entry: a character is scoped to this one game, not portable across
+/// different games.
+#[derive(Component, Debug, Clone, Copy)]
+struct CharacterId(u128);
+
 fn main() {
+    let game_id = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "default".to_string());
+    // Plain `println!`, not `info!` — this runs before `App::new()` even
+    // adds `LogPlugin`, so `tracing`'s global subscriber doesn't exist yet
+    // and an `info!` call here would be silently dropped.
+    println!("using game id {game_id:?} (saves/{game_id}/)");
+
     App::new()
         .add_plugins(
             MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
@@ -80,9 +129,19 @@ fn main() {
         .add_plugins(PhysicsPlugins::default())
         // Top-down game: no downward pull, movement is fully player/AI-driven.
         .insert_resource(Gravity(Vector::ZERO))
+        .insert_resource(GameId(game_id))
         .init_resource::<DeltaSeconds>()
+        .init_resource::<ActiveCharacters>()
         .add_message::<AttackRequested>()
-        .add_systems(Startup, (setup, spawn_map_colliders, spawn_enemies))
+        .add_systems(
+            Startup,
+            (
+                load_game_password,
+                setup,
+                spawn_map_colliders,
+                spawn_enemies,
+            ),
+        )
         .add_systems(
             Update,
             (
@@ -105,6 +164,7 @@ fn main() {
                 .chain(),
         )
         .add_observer(on_client_connected)
+        .add_observer(on_character_disconnected)
         .add_observer(on_player_downed)
         .run();
 }
@@ -138,9 +198,34 @@ fn setup(mut commands: Commands, channels: Res<RepliconChannels>) -> Result<()> 
     Ok(())
 }
 
+/// Loads this game's existing password from `saves/<game_id>/game.ron` at
+/// startup, if the file exists — a brand-new game (no file yet) leaves
+/// `GamePassword` at its default `None`, claimed by whoever connects first
+/// (see `on_client_connected`). A corrupt file panics here, at Startup
+/// before anyone's connected, matching the same "malformed content fails
+/// loudly" convention `spawn_enemies`/`spawn_map_colliders` already use —
+/// nothing mid-session is lost by refusing to start.
+fn load_game_password(mut commands: Commands, game_id: Res<GameId>) {
+    let existing = persistence::load_game_save(Path::new(SAVES_DIR), &game_id.0)
+        .unwrap_or_else(|error| panic!("failed to load game save: {error}"));
+    commands.insert_resource(GamePassword(existing.map(|save| save.password)));
+}
+
 /// Every connected client is represented as an entity with `ConnectedClient`;
 /// we attach the player's gameplay components directly to that same entity
 /// rather than tracking a separate client-to-player mapping.
+///
+/// Before any gameplay setup, validates the `ConnectAuth` payload carried
+/// in netcode's connection-time `user_data` (see `protocol::ConnectAuth`):
+/// the game password must match (or this is the very first connection
+/// ever, which claims the supplied password as canonical), the character
+/// must not already be connected (`ActiveCharacters`), and if a save
+/// already exists for that character its password must match too. Any
+/// failure disconnects the client and returns before any gameplay
+/// component is inserted — `bevy_replicon_renet` despawns the
+/// (`ConnectedClient`-only) entity itself once the disconnect is
+/// processed (verified in its source), so there's nothing to clean up
+/// here.
 ///
 /// Movement/collision is resolved by avian2d (`RigidBody`/`Collider`/
 /// `PhysicsPosition`/`LinearVelocity`), not `game_core::movement_system` —
@@ -155,9 +240,114 @@ fn setup(mut commands: Commands, channels: Res<RepliconChannels>) -> Result<()> 
 /// colliders while still letting us drive them directly via `LinearVelocity`
 /// each tick. `LockedAxes::ROTATION_LOCKED` and `Friction::ZERO` keep a
 /// directly-velocity-driven circle from spinning or sticking on contact.
-fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
-    commands.entity(add.entity).insert((
+// Eight params is inherent to what this system does (connection lifecycle,
+// auth validation, and persistence each need their own resource/query) —
+// splitting it up would mean passing most of these straight through to a
+// helper anyway, not reducing real complexity.
+#[allow(clippy::too_many_arguments)]
+fn on_client_connected(
+    add: On<Add, ConnectedClient>,
+    mut commands: Commands,
+    network_ids: Query<&NetworkId>,
+    transport: Res<NetcodeServerTransport>,
+    mut server: ResMut<RenetServer>,
+    game_id: Res<GameId>,
+    mut game_password: ResMut<GamePassword>,
+    mut active_characters: ResMut<ActiveCharacters>,
+) {
+    let entity = add.entity;
+    let Ok(&network_id) = network_ids.get(entity) else {
+        return;
+    };
+    let client_id = network_id.get();
+    let saves_dir = Path::new(SAVES_DIR);
+
+    let Some(user_data) = transport.user_data(client_id) else {
+        warn!("rejecting client {client_id}: no auth data supplied");
+        server.disconnect(client_id);
+        return;
+    };
+    let Ok(auth) = ConnectAuth::decode(&user_data) else {
+        warn!("rejecting client {client_id}: malformed auth data");
+        server.disconnect(client_id);
+        return;
+    };
+
+    match &game_password.0 {
+        Some(expected) if *expected != auth.game_password => {
+            warn!("rejecting client {client_id}: wrong game password");
+            server.disconnect(client_id);
+            return;
+        }
+        Some(_) => {}
+        None => {
+            let save = persistence::GameSave {
+                password: auth.game_password.clone(),
+            };
+            if let Err(error) = persistence::save_game_save(saves_dir, &game_id.0, &save) {
+                error!("rejecting client {client_id}: failed to create new game save: {error}");
+                server.disconnect(client_id);
+                return;
+            }
+            game_password.0 = Some(auth.game_password.clone());
+        }
+    }
+
+    if active_characters.0.contains_key(&auth.character_id) {
+        warn!(
+            "rejecting client {client_id}: character {} is already connected",
+            auth.character_id
+        );
+        server.disconnect(client_id);
+        return;
+    }
+
+    let (level, stats, points) =
+        match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
+            Ok(Some(save)) => {
+                if save.password != auth.character_password {
+                    warn!("rejecting client {client_id}: wrong character password");
+                    server.disconnect(client_id);
+                    return;
+                }
+                (save.level, save.stats, save.points)
+            }
+            Ok(None) => {
+                let save = persistence::CharacterSave {
+                    password: auth.character_password.clone(),
+                    level: Level::default(),
+                    stats: Stats::default(),
+                    points: UnspentStatPoints::default(),
+                };
+                if let Err(error) = persistence::save_character_save(
+                    saves_dir,
+                    &game_id.0,
+                    auth.character_id,
+                    &save,
+                ) {
+                    error!(
+                        "rejecting client {client_id}: failed to create new character save: {error}"
+                    );
+                    server.disconnect(client_id);
+                    return;
+                }
+                (save.level, save.stats, save.points)
+            }
+            Err(error) => {
+                error!("rejecting client {client_id}: failed to load character save: {error}");
+                server.disconnect(client_id);
+                return;
+            }
+        };
+
+    active_characters.0.insert(auth.character_id, entity);
+
+    commands.entity(entity).insert((
         Player,
+        CharacterId(auth.character_id),
+        level,
+        stats,
+        points,
         Position { x: 0.0, y: 0.0 },
         Facing::default(),
         MoveSpeed(PLAYER_SPEED),
@@ -195,6 +385,66 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
             LinearVelocity::default(),
         ),
     ));
+}
+
+/// Persists a character's current `Level`/`Stats`/`UnspentStatPoints` back
+/// to its save file the moment they disconnect. Fires on `Remove` (which
+/// runs *before* the component is actually gone, so the rest of the
+/// entity's data is still readable), not by reacting to
+/// `RenetServerEvent(ServerEvent::ClientDisconnected)` directly — that
+/// event is also how `bevy_replicon_renet` itself decides to despawn the
+/// entity (verified in its source), and relying on two separate observers
+/// for the same custom event to run in a particular order isn't a
+/// guarantee Bevy actually makes; a component-removal hook on the entity
+/// being despawned is.
+///
+/// A connection rejected in `on_client_connected` (disconnected before any
+/// gameplay component was inserted) has no `CharacterId` here and is
+/// silently skipped — there was never anything to save.
+fn on_character_disconnected(
+    remove: On<Remove, ConnectedClient>,
+    mut active_characters: ResMut<ActiveCharacters>,
+    game_id: Res<GameId>,
+    characters: Query<(&CharacterId, &Level, &Stats, &UnspentStatPoints)>,
+) {
+    let Ok((character_id, level, stats, points)) = characters.get(remove.entity) else {
+        return;
+    };
+    active_characters.0.remove(&character_id.0);
+
+    let saves_dir = Path::new(SAVES_DIR);
+    let password = match persistence::load_character_save(saves_dir, &game_id.0, character_id.0) {
+        Ok(Some(save)) => save.password,
+        Ok(None) => {
+            error!(
+                "character {} disconnected with no save file to preserve a password for",
+                character_id.0
+            );
+            return;
+        }
+        Err(error) => {
+            error!(
+                "failed to reload character {} save before writing: {error}",
+                character_id.0
+            );
+            return;
+        }
+    };
+
+    let save = persistence::CharacterSave {
+        password,
+        level: *level,
+        stats: *stats,
+        points: *points,
+    };
+    if let Err(error) =
+        persistence::save_character_save(saves_dir, &game_id.0, character_id.0, &save)
+    {
+        error!(
+            "failed to save character {} on disconnect: {error}",
+            character_id.0
+        );
+    }
 }
 
 /// A player who dies mid-move would otherwise keep sliding under whatever

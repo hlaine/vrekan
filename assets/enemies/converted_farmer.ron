@@ -10,6 +10,7 @@
     crit_multiplier: 1.5,
     color: (0.8, 0.15, 0.15),
     size: 28.0,
+    xp_reward: 10.0,
     // Daze: repeated hits just extend the stun, not stack its length —
     // demonstrates RefreshDuration stacking (see MECHANICS.md's Combat
     // section). Only a chance per hit, and duration is kept well under

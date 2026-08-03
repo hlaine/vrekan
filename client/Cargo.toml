@@ -12,6 +12,7 @@ bevy_replicon_renet = { workspace = true }
 content = { path = "../content" }
 game_core = { path = "../game_core" }
 protocol = { path = "../protocol" }
+rand = { workspace = true }
 
 [features]
 dynamic_linking = ["bevy/dynamic_linking"]

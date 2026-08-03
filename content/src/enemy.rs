@@ -6,7 +6,7 @@ use bevy_ecs::prelude::*;
 use game_core::{
     ActiveEffects, Aggro, AttackTimer, CombatStats, DamageType, EffectDefinition, EffectKind,
     EffectTarget, Enemy, EnemyKind, Facing, Health, MeleeAttack, MoveSpeed, Position, Resistances,
-    StackMode, Stat, Velocity,
+    StackMode, Stat, Velocity, XpReward,
 };
 use serde::Deserialize;
 
@@ -103,6 +103,11 @@ pub struct EnemyTemplate {
     /// MECHANICS.md's Combat section. Optional: most enemies apply nothing.
     #[serde(default)]
     pub effects: Vec<EffectTemplate>,
+    /// XP granted to whichever player lands the killing blow — see
+    /// `game_core::progression::XpReward`. Required (not defaulted) so a
+    /// content author always makes a conscious choice rather than an enemy
+    /// silently granting nothing.
+    pub xp_reward: f32,
 }
 
 pub fn parse_enemy_template(ron_str: &str) -> ron::error::SpannedResult<EnemyTemplate> {
@@ -200,6 +205,7 @@ pub fn spawn_enemy(
             Aggro {
                 range: template.aggro_range,
             },
+            XpReward(template.xp_reward),
         ))
         .id()
 }
@@ -232,6 +238,7 @@ mod tests {
         resistances: {"holy": 0.2},
         color: (0.8, 0.15, 0.15),
         size: 28.0,
+        xp_reward: 10.0,
     )"#;
 
     #[test]
@@ -257,6 +264,7 @@ mod tests {
                 crit_multiplier: 1.5,
                 color: (0.8, 0.15, 0.15),
                 size: 28.0,
+                xp_reward: 10.0,
             )"#,
         )
         .unwrap();
