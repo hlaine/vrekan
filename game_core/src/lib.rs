@@ -5,7 +5,7 @@ pub mod player;
 
 pub use combat::{AttackRequested, AttackTimer, Health, MeleeAttack};
 pub use enemy::{Aggro, Enemy};
-pub use movement::{MoveSpeed, Position, Velocity};
+pub use movement::{leash_system, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
 pub use player::Player;
 
 use bevy_ecs::prelude::*;

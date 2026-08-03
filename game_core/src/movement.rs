@@ -1,6 +1,7 @@
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::player::Player;
 use crate::DeltaSeconds;
 
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -55,6 +56,45 @@ pub fn movement_system(delta: Res<DeltaSeconds>, mut query: Query<(&mut Position
     }
 }
 
+/// Max distance any two party members' positions may diverge. The shared
+/// camera's max zoom and the hard leash boundary are the same number (see
+/// DESIGN.md's Camera & movement section) — defined once here so the
+/// client's zoom calculation and the server's clamp can't drift apart.
+pub const LEASH_DISTANCE: f32 = 500.0;
+
+/// Clamps every party member's distance from the party centroid to at most
+/// half of `LEASH_DISTANCE`, so by the triangle inequality no two players end
+/// up more than `LEASH_DISTANCE` apart. Enforced here, in `game_core`, so it
+/// runs as part of the server's authoritative movement resolution rather
+/// than as a client-side cosmetic clamp — see DESIGN.md's Camera & movement
+/// section for why a client-side-only leash isn't acceptable.
+pub fn leash_system(mut players: Query<&mut Position, With<Player>>) {
+    let count = players.iter().count();
+    if count < 2 {
+        return;
+    }
+
+    let (sum_x, sum_y) = players.iter().fold((0.0, 0.0), |(sx, sy), position| {
+        (sx + position.x, sy + position.y)
+    });
+    let centroid = Position {
+        x: sum_x / count as f32,
+        y: sum_y / count as f32,
+    };
+    let max_radius = LEASH_DISTANCE / 2.0;
+
+    for mut position in &mut players {
+        let dx = position.x - centroid.x;
+        let dy = position.y - centroid.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance > max_radius {
+            let scale = max_radius / distance;
+            position.x = centroid.x + dx * scale;
+            position.y = centroid.y + dy * scale;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +129,62 @@ mod tests {
     fn velocity_toward_coincident_positions_is_zero() {
         let point = Position { x: 5.0, y: 5.0 };
         assert_eq!(Velocity::toward(&point, &point, 10.0), Velocity::ZERO);
+    }
+
+    #[test]
+    fn leash_system_is_a_no_op_with_fewer_than_two_players() {
+        let mut world = World::new();
+        let solo = world
+            .spawn((
+                Position {
+                    x: 10_000.0,
+                    y: 0.0,
+                },
+                Player,
+            ))
+            .id();
+
+        let _ = world.run_system_once(leash_system);
+
+        assert_eq!(
+            *world.get::<Position>(solo).unwrap(),
+            Position {
+                x: 10_000.0,
+                y: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn leash_system_leaves_players_within_range_untouched() {
+        let mut world = World::new();
+        let a = world.spawn((Position { x: 0.0, y: 0.0 }, Player)).id();
+        let b = world.spawn((Position { x: 100.0, y: 0.0 }, Player)).id();
+
+        let _ = world.run_system_once(leash_system);
+
+        assert_eq!(
+            *world.get::<Position>(a).unwrap(),
+            Position { x: 0.0, y: 0.0 }
+        );
+        assert_eq!(
+            *world.get::<Position>(b).unwrap(),
+            Position { x: 100.0, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn leash_system_pulls_players_back_to_leash_distance_apart() {
+        let mut world = World::new();
+        let a = world.spawn((Position { x: -400.0, y: 0.0 }, Player)).id();
+        let b = world.spawn((Position { x: 400.0, y: 0.0 }, Player)).id();
+
+        let _ = world.run_system_once(leash_system);
+
+        let pos_a = *world.get::<Position>(a).unwrap();
+        let pos_b = *world.get::<Position>(b).unwrap();
+        assert!((pos_a.distance(&pos_b) - LEASH_DISTANCE).abs() < 1e-4);
+        assert!((pos_a.x - (-LEASH_DISTANCE / 2.0)).abs() < 1e-4);
+        assert!((pos_b.x - (LEASH_DISTANCE / 2.0)).abs() < 1e-4);
     }
 }

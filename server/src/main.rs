@@ -10,7 +10,7 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
 };
-use game_core::movement::movement_system;
+use game_core::movement::{leash_system, movement_system};
 use game_core::{DeltaSeconds, MoveSpeed, Player, Position, Velocity};
 use protocol::{MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
 
@@ -36,7 +36,13 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (update_delta_seconds, apply_move_input, movement_system).chain(),
+            (
+                update_delta_seconds,
+                apply_move_input,
+                movement_system,
+                leash_system,
+            )
+                .chain(),
         )
         .add_observer(on_client_connected)
         .run();
