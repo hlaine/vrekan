@@ -25,7 +25,10 @@ resistance numbers or networking code.
 ## Core loop
 
 Real-time, direct movement (WASD/stick) with aimed abilities — dodge-focused, not
-click-to-move. Player roams an open overworld with continuously respawning
+click-to-move. "Aimed" means facing-based, not independent mouse-look: a
+character's facing direction is derived from their last movement input, and
+directional attacks are checked against that facing — see `MECHANICS.md`'s
+Combat section. Player roams an open overworld with continuously respawning
 enemies, and enters explicit dungeon instances to complete objectives. The core
 drive is grinding loot, levels, and upgrades to take on progressively stronger
 enemies. Player-to-player trading is out of scope — the only way to give
@@ -69,6 +72,18 @@ see `MECHANICS.md`.
   — chosen for natural-looking terrain silhouettes (a valley should read as
   a genuine narrow pass between mountains, not a staircase of grid tiles).
   Authored in Tiled alongside the visual tileset.
+- **Enemies are solid bodies, not passable.** A player can't walk through an
+  enemy — same server-authoritative physics collision system as map terrain
+  (`avian2d`). Bumping one transfers some momentum (normal dynamic-body
+  physics, not a scripted "immovable object" special case), but an enemy's
+  mass scales with its size, so a large/heavy enemy barely budges while a
+  small one can be shoved more easily. This is what makes "defeat or lure
+  away the enemy blocking this passage" an actual tactical choice rather
+  than something a player can freely bulldoze through. Enemies also collide
+  with each other (no stacking on the same spot when several chase one
+  player) and with a downed player's body — still physically present even
+  though out of combat, not incorporeal (see `MECHANICS.md`'s downed-state
+  section).
 
 ## Multiplayer scope
 

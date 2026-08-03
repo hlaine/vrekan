@@ -101,6 +101,17 @@ Claude Code tasks as you start it, not all upfront.
   like `MoveInput` (continuous state, `Channel::Unreliable`). No revive
   progress bar yet — that's M8 HUD work; the only client feedback today is
   the downed tint clearing once revived.
+- [ ] Additions beyond this milestone's original scope, added after a design
+  discussion on movement/combat feel:
+  - Enemies are solid `avian2d` bodies — block players (and each other, and
+    downed players), can't be walked through. Mass scales with enemy size,
+    so bumping a big enemy barely moves it while a small one can be shoved
+    — normal dynamic-body physics, not a scripted immovable-object case. See
+    `DESIGN.md`'s Camera & movement section.
+  - Player facing direction, derived from movement input, server-
+    authoritative and replicated — groundwork for directional (cone) melee
+    attacks, not yet used to gate anything. See `MECHANICS.md`'s Combat
+    section.
 
 ## M5 — Progression: leveling & stats
 - [ ] XP, character level, manual stat point allocation on level up — see

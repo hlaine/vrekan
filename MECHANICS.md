@@ -36,6 +36,30 @@ should be a per-effect data field, not a single global rule). This is the
 same content-first principle as enemy/item templates: adding a new effect
 should mean a new data entry, not new engine code for that specific effect.
 
+**Facing direction.** Every player has a facing direction derived from their
+last non-zero movement input (WASD), holding the last facing while
+stationary — server-authoritative and replicated, not client-inferred,
+consistent with movement itself being server-resolved (see `DESIGN.md`'s
+Camera & movement section). This is what "aimed" means in `DESIGN.md`'s
+Core loop: no independent mouse-look for v1.
+
+**Attack range/shape stays pure math, not physics colliders.** Melee (and
+later ranged) hit detection is a distance check — and, once directional
+attacks exist, an angle-from-facing check for a cone/arc rather than an
+omnidirectional radius — resolved directly in `game_core`, not a spawned
+physics hitbox/sensor entity. This keeps combat resolution unit-testable
+without a running Bevy app (see `CLAUDE.md`). Reserve real physics colliders
+for hit detection only if a shape genuinely can't be expressed as
+distance/angle math.
+
+**Ranges are content data, eventually.** Each weapon/attack's range (and,
+once directional attacks exist, its facing-cone angle) belongs in RON
+content alongside other weapon/item stats (M7) — the same data-not-engine-
+code principle as damage types and enemy templates, not a hardcoded
+per-weapon Rust constant. Not yet built: today `MeleeAttack::range` is
+still a plain per-entity field set in code (`server`'s constants for the
+player, enemy templates for enemies).
+
 ## Resources ("öd")
 
 A single resource pool — "öd" and "fury/rage" are the same pool, just
@@ -142,3 +166,6 @@ components, not a fork of the base enemy system.
 - Whether the crit-before-resistance ordering feels right in practice.
 - Stacking rules for status effects may need per-effect-type refinement once
   a few real effects exist and can be tested together.
+- Whether enemies should also get a facing direction and directional melee
+  arcs (matching players), or keep the current omnidirectional radius check
+  for AI-driven attacks indefinitely.
