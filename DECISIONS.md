@@ -900,3 +900,76 @@ before the next tuple element starts.
 **Consequences:** Any further schedule/bundle growth should watch for this
 same ceiling and reach for the same nested-tuple fix rather than trying to
 flatten everything into one tuple.
+
+---
+
+## M7 part 1: items, sockets/runes, loot tables — a dangling doc reference and a real scope decision
+
+**Context:** ROADMAP's M7 bullet read "Affix/forging system (the 'custom
+system' from `DESIGN.md`)" — checked `DESIGN.md`'s full git history before
+starting and confirmed that phrase has never actually been described
+anywhere in it, in any commit. Unlike M6 (where `MECHANICS.md` had a
+concrete resource/skill shape to build against), the forging mechanic had
+no real spec, just a dangling reference. Confirmed with the user before
+building: a **socket/rune system** (items have a fixed number of sockets
+from their template; runes are found/socketed for permanent stat bonuses;
+unsocketing is free and reversible, not a currency sink — that can be
+layered on once the vendor economy, M7 part 2, actually exists to spend
+into).
+
+**Decision — an item is its own instance (`template_key` + `sockets`), not
+an entity.** Unlike enemies (one shared `EnemyTemplate` instantiated as
+many identical-shape entities), two drops of the same item template have
+independently-empty then independently-socketed sockets — genuinely
+unique per-instance state, not just a content lookup key. Modeled as plain
+data (`Item { template_key, sockets }`) carried inline inside
+`Inventory`/`Equipment`/`ItemDrop`, not a full ECS entity with its own
+lifecycle — avoids the complexity of transferring "ownership" of an entity
+between world-drop and inventory-slot conceptual containers for something
+that's fundamentally owned, non-shared data. Runes, by contrast, are
+fungible (`RuneInventory: HashMap<rune_id, count>`), matching how
+real-world stackable currency/materials are normally modeled rather than
+tracking individual rune instances.
+
+**Decision — item/rune stat bonuses actually wire into combat/movement
+this pass**, not left inert like M5's `Stats` bonuses. Reusing the exact
+"compute fresh at point of use" pattern `ActiveEffects::stat_bonus`
+already established (see the M4 fury/ally-revive entry above):
+`Equipment::stat_bonus(stat, &RuneLibrary)` sums matching socketed runes
+across all three slots, added into `attack_system`'s effective crit stats
+and `apply_move_input`'s effective speed, never baked into the base
+component — so unsocketing a rune can't leave a stale bonus behind.
+Deliberately **not extending `Stat` with a `MaxHealth` variant yet**:
+`status_effect::Stat`'s own doc comment says "extend only once a new stat
+is actually wired up somewhere, not speculatively," and safely rescaling
+current health when max changes (what happens to a player at 40/100 when
+max drops to 80?) needs its own deliberate handling, not a rushed addition
+alongside everything else in this pass.
+
+**Decision — a loot roll happens inline inside `combat::death_system`, not
+a second system also watching for zero health.** A separate system
+checking the same `Health::is_dead()` condition to decide whether to spawn
+loot would race against `death_system`'s own despawn over which runs
+first and whether the dying entity's `Position`/`LootTable` are still
+readable — the same class of hazard the M5 disconnect-save entry solved
+by moving off a second observer entirely. Inlining the roll into
+`death_system`'s existing despawn branch sidesteps the race the same way.
+
+**Found while wiring `game_core::item`'s `ItemDrop` spawn — `game_core`
+can't insert `bevy_replicon`'s `Replicated` marker itself.**
+`death_system` spawns a world-visible loot drop entity, but `game_core` has
+no networking dependency at all (see `CLAUDE.md`'s crate boundaries), so
+unlike `spawn_enemies`/`on_client_connected` (which insert `Replicated`
+inline, in the same server-side function call, right after spawning),
+there's no way for `game_core` itself to tag its own spawn as replicated.
+Fixed with a small dedicated server-side system,
+`tag_item_drops_for_replication`, reacting to `Added<ItemDrop>` and
+inserting `Replicated` a moment later — a one-tick delay before a drop
+becomes network-visible, which is imperceptible and not worth avoiding by
+compromising the crate boundary.
+
+**Consequences:** Any future `game_core` system that needs to spawn a
+world-visible entity (not just mutate/despawn an existing one) will hit
+the same `Replicated`-insertion gap and needs the same "server reacts to
+`Added<T>` a moment later" fix, not an attempt to give `game_core` a
+`bevy_replicon` dependency.

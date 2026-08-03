@@ -211,13 +211,39 @@ Claude Code tasks as you start it, not all upfront.
   `combat::OD_GAIN_PER_HIT`.
 
 ## M7 — Items & forging
-- [ ] Item drops, pickup, equip
-- [ ] Affix/forging system (the "custom system" from `DESIGN.md`)
-- [ ] Loot tables tied to enemy tiers
+- [x] Item drops, pickup, equip — `game_core::item`: `Item`/`Inventory`/
+  `Equipment`, server-validated `PickupItemInput`/`EquipItemInput`/
+  `UnequipItemInput`. Pickup is a deliberate button-press on the nearest
+  drop in range, not automatic walk-over (matches `ReviveInput`'s existing
+  interact-button precedent). Equip/unequip are hotkey-driven client-side
+  as a stand-in for the real inventory UI (M8), same pattern as M6's skill
+  hotkeys.
+- [x] Affix/forging system (the "custom system" from `DESIGN.md`) — this
+  phrase never actually had a description anywhere in `DESIGN.md` (checked
+  its full history; it's been a dangling reference since the initial docs
+  commit). Confirmed with the user: a **socket/rune system** — items have
+  a fixed number of sockets (from their template), runes are found/
+  socketed for permanent stat bonuses, unsocketing is free and reversible.
+  `SocketRuneInput`/`UnsocketRuneInput`, `game_core::socket_rune`/
+  `unsocket_rune`. See `DECISIONS.md`.
+- [x] Loot tables tied to enemy tiers — `LootTable`/`LootEntry` attached
+  per enemy instance from `EnemyTemplate::loot_table`/`drop_chance`,
+  rolled once at the exact moment of death inside `combat::death_system`
+  (see `game_core::roll_loot`).
 - [ ] Vendor buy/sell economy, individual currency per player — see
-  `MECHANICS.md`
+  `MECHANICS.md`. Deferred to a part 2 pass: `MECHANICS.md` itself calls
+  this "a distinct system" from the loot/forging pipeline above.
 - [ ] Enemy visual-variant data shape (shared base template + swappable
-  sprite field) — see `MECHANICS.md`
+  sprite field) — see `MECHANICS.md`. Deferred to the same part 2 pass;
+  unrelated to forging, just filed under the same milestone.
+
+Item/rune stat bonuses (crit chance/multiplier, move speed) are wired into
+live combat/movement resolution this pass, computed fresh at point of use
+(`Equipment::stat_bonus`) — not left inert like M5's `Stats` bonuses, to
+avoid stacking up two unwired mechanical systems. `Stat` deliberately has
+no `MaxHealth` variant yet (see `DECISIONS.md`): safely rescaling current
+health when max changes needs its own care, not worth rushing into this
+pass just to add a rune type for it.
 
 ## M8 — UI: HUD & menus
 - [ ] egui HUD: health/resource (od), cooldowns, minimap, party status,
