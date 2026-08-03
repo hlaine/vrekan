@@ -836,3 +836,67 @@ test the wrong thing (every call looking like "first ever run") rather
 than failing to compile or erroring obviously. `run_system_once` stays
 fine for the common case of "run this system once and check the result,"
 just not for change-detection-across-ticks assertions specifically.
+
+---
+
+## M6 skill system: gated acquisition built now, `Od` naming, three `SkillKind` shapes
+
+**Context:** M6's roadmap called for data-driven skill acquisition/upgrade,
+2-3 mechanically distinct skills, and the "öd" resource power attacks
+consume (see `MECHANICS.md`). Confirmed with the user before building:
+build the full gated-acquisition data model now even though nothing will
+be castable in a live playthrough until M8's skill-tree UI can spend
+points into it — same call already made for M5's `Stats` bonuses, just
+applied to skills too. Also confirmed: rename "öd" to "od" everywhere,
+including in code identifiers.
+
+**Decision — the resource-pool component is `Od`, not `Resource`.**
+Straightforward once the rename was decided: `Resource` is already Bevy's
+own ECS-resource derive macro, so naming the pool component that would
+have shadowed a core Bevy concept for no reason. `Od { current, max,
+regen_rate }` regenerates passively (`tick_od_regen`) and gains a flat
+bonus on any landed melee hit (`combat::OD_GAIN_PER_HIT`, in
+`attack_system`) — MECHANICS.md's "dual generation."
+
+**Decision — `KnownSkills`/`UnspentSkillPoints` are empty/zero for every
+character until M8.** Mirrors `UnspentStatPoints`/`Stats` from M5 exactly:
+`progression::grant_xp` now awards skill points alongside stat points on
+every level-up, but nothing exists yet to spend them into `KnownSkills`
+(keyed by skill id, valued by upgrade level), so no character can actually
+cast anything in a live playthrough this milestone. Confirmed explicitly
+with the user rather than defaulting every character to "knows everything"
+— the latter would have made the cast/cooldown/cost path live-testable
+sooner, but at the cost of a fake acquisition model that would need
+unwinding once the real UI arrives. The cast/cooldown/cost resolution path
+itself (`skill_cast_system`) is still fully real and unit-tested; only the
+"how does a character come to know a skill" gate is stubbed out.
+
+**Decision — three `SkillKind` shapes, not one generic "attack" shape.**
+`PowerStrike` (nearest single target, reuses `combat::attack_system`'s
+targeting rule) and `AoeBurst` (every valid target within radius — a
+genuinely different resolution, not a parameterized variant of nearest-
+target search) both support the same per-hit `effects: Vec<EffectDefinition>`
+melee attacks already have. `SelfBuff` has no target at all — it applies an
+`EffectDefinition` straight to the caster's own `ActiveEffects`. New skills
+reusing one of these three shapes are just a new `assets/spells/*.ron` file
+(`content::SkillTemplate` mirrors `EnemyTemplate`'s load-time-conversion
+pattern exactly, including reusing `EffectTemplate` from `enemy.rs` rather
+than duplicating it); a fourth *shape* would be an engine change.
+
+**Found while wiring the server's schedule — Bevy's tuple-based
+`IntoSystemConfigs`/`Bundle` impls have a fixed arity ceiling.** Adding four
+new systems to the already-long `Update` schedule chain (21 systems total)
+made `.chain()` stop resolving — the trait is only implemented for tuples
+up to a fixed size, not arbitrary length. Same problem hit the player
+entity's component-insert bundle once `Od`/`KnownSkills`/`UnspentSkillPoints`/
+`SkillCooldowns` were added. Fixed the same way in both places: group the
+overflow into a nested tuple (`(a, b, c).chain()` as one element of an outer
+chained tuple; a nested `(x, y, z)` as one element of the outer `insert(...)`
+bundle) — Bevy already used this trick for the player's physics components
+before this pass, it just hadn't been needed for the schedule tuple yet.
+Ordering is unaffected: a nested `.chain()` group still runs start-to-finish
+before the next tuple element starts.
+
+**Consequences:** Any further schedule/bundle growth should watch for this
+same ceiling and reach for the same nested-tuple fix rather than trying to
+flatten everything into one tuple.

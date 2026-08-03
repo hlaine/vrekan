@@ -189,10 +189,26 @@ Claude Code tasks as you start it, not all upfront.
   progression and reconnecting with the right password restores it.
 
 ## M6 — Skills
-- [ ] Skill acquisition and upgrade, data-driven like enemies/items
-- [ ] At least 2-3 skills with distinct mechanical behavior
-- [ ] "Öd" resource (regen + combat/action-generated), power attacks that
-  consume it — see `MECHANICS.md`
+- [x] Skill acquisition and upgrade, data-driven like enemies/items —
+  `content::SkillTemplate` (`assets/spells/*.ron`) mirrors
+  `EnemyTemplate`'s shape; `game_core::KnownSkills`/`UnspentSkillPoints`
+  gate which skills a character can actually cast, persisted like
+  `Stats`/`UnspentStatPoints`. Empty for every character right now: there's
+  no skill-tree UI to spend points and populate `KnownSkills` yet (that's
+  M8's job), so nothing is castable in a live playthrough until then — same
+  "build the data model now, gate it behind a later UI" shape M5 used for
+  `Stats`. See `DECISIONS.md`.
+- [x] At least 2-3 skills with distinct mechanical behavior —
+  `game_core::SkillKind`: `PowerStrike` (single nearest target, reuses
+  melee-attack targeting), `AoeBurst` (every valid target in radius, not
+  just nearest — genuinely different resolution), `SelfBuff` (no target,
+  applies an effect to the caster). Content files:
+  `power_strike`/`aoe_burst`/`berserk`.
+- [x] "Od" resource (regen + combat/action-generated), power attacks that
+  consume it — see `MECHANICS.md`. `game_core::Od` (not named `Resource`,
+  Bevy's own ECS-resource derive already owns that name); passive regen via
+  `tick_od_regen`, bonus gain on any landed melee hit via
+  `combat::OD_GAIN_PER_HIT`.
 
 ## M7 — Items & forging
 - [ ] Item drops, pickup, equip
@@ -204,7 +220,7 @@ Claude Code tasks as you start it, not all upfront.
   sprite field) — see `MECHANICS.md`
 
 ## M8 — UI: HUD & menus
-- [ ] egui HUD: health/resource (öd), cooldowns, minimap, party status,
+- [ ] egui HUD: health/resource (od), cooldowns, minimap, party status,
   downed-state indicator
 - [ ] Inventory, skill tree, forging UI, vendor/shop UI — built alongside
   M6/M7, not deferred wholesale to the end

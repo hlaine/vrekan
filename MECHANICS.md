@@ -65,15 +65,16 @@ per-weapon Rust constant. Not yet built: today `MeleeAttack::range` is
 still a plain per-entity field set in code (`server`'s constants for the
 player, enemy templates for enemies).
 
-## Resources ("öd")
+## Resources ("od")
 
-A single resource pool — "öd" and "fury/rage" are the same pool, just
+A single resource pool — "od" and "fury/rage" are the same pool, just
 flavor-named differently depending on context (e.g. UI copy might call it
-"fury" narratively while the underlying field is `od`). Generation is dual:
-slow passive regeneration over time, plus bonus gains from specific actions
-and from landing hits in combat. Power attacks consume it. Model this as one
-`Resource` component with a regen-rate field and discrete gain events, not
-two separate pools.
+"fury" narratively while the underlying component is `Od`). Generation is
+dual: slow passive regeneration over time, plus bonus gains from specific
+actions and from landing hits in combat. Power attacks consume it. Model
+this as one `Od` component (`current`/`max`/`regen_rate`) with discrete
+gain events, not two separate pools — not named `Resource`, since that name
+is already Bevy's own ECS-resource derive macro.
 
 ## Progression
 
