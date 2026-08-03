@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use bevy::camera::Projection;
 use bevy::prelude::*;
+use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::{
@@ -34,6 +35,12 @@ const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 // aggro_range reaches an idle player at startup.
 const ENEMY_SPAWN_SPACING: f32 = 150.0;
 
+// Relative to the assets root (loaded via AssetServer), not the filesystem
+// path used for ENEMY_TEMPLATES_DIR above. Must stay in sync with the
+// server's MAP_PATH — see server/src/main.rs's spawn_map_colliders doc
+// comment for the anchor/coordinate convention this depends on.
+const MAP_PATH: &str = "maps/valley.tmx";
+
 // Orthographic projection scale at zero and max party spread, respectively —
 // tuning constants, not derived from anything.
 const MIN_ZOOM: f32 = 0.7;
@@ -62,15 +69,28 @@ struct LocalPlayer(Option<Entity>);
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Vrekan".into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Vrekan".into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // Bevy's default asset root resolves relative to this crate's
+                // own manifest directory (a `cargo run`-from-anywhere
+                // convenience), but this project keeps one shared `assets/`
+                // folder at the workspace root (already used by `content`'s
+                // direct filesystem loading) — point the asset server there.
+                .set(AssetPlugin {
+                    file_path: "../assets".into(),
+                    ..default()
+                }),
+        )
         .add_plugins((RepliconPlugins, RepliconRenetPlugins))
         .add_plugins(NetworkPlugin)
+        .add_plugins(TiledPlugin::default())
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
         .add_message::<AttackRequested>()
@@ -95,8 +115,13 @@ fn main() {
         .run();
 }
 
-fn setup_scene(mut commands: Commands) {
+fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2d);
+
+    commands.spawn((
+        TiledMap(asset_server.load(MAP_PATH)),
+        TilemapAnchor::TopLeft,
+    ));
 
     let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
         .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));

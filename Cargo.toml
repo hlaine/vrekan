@@ -22,3 +22,15 @@ ron = "=0.12.2"
 bevy_replicon = "=0.41.1"
 bevy_replicon_renet = "=0.17.0"
 bevy_app = "=0.19.0"
+# Client-only: renders Tiled maps. default-features = false here because the
+# server must never link it — see CLAUDE.md's feature-unification note and
+# MECHANICS.md-adjacent ROADMAP.md M3.5 entry for why.
+bevy_ecs_tiled = { version = "=0.13.3", default-features = false }
+# Server-only: physics/collision backend for map colliders. default-features
+# = false because avian2d's own defaults pull in bevy_render via
+# "debug-plugin" — see CLAUDE.md's feature-unification note.
+avian2d = { version = "=0.7.0", default-features = false }
+# Server-only: plain (non-Bevy) Tiled map parser, used to extract collider
+# geometry without depending on bevy_ecs_tiled (which hard-depends on
+# bevy_render regardless of features — see CLAUDE.md).
+tiled = "=0.16.0"
