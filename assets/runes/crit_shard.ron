@@ -1,0 +1,4 @@
+(
+    stat: CritChance,
+    magnitude: 0.05,
+)

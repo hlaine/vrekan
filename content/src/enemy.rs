@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use bevy_ecs::prelude::*;
 use game_core::{
     ActiveEffects, Aggro, AttackTimer, CombatStats, DamageType, EffectDefinition, EffectKind,
-    EffectTarget, Enemy, EnemyKind, Facing, Health, MeleeAttack, MoveSpeed, Position, Resistances,
-    StackMode, Stat, Velocity, XpReward,
+    EffectTarget, Enemy, EnemyKind, Facing, Health, LootEntry, LootKind, LootTable, MeleeAttack,
+    MoveSpeed, Position, Resistances, StackMode, Stat, Velocity, XpReward,
 };
 use serde::Deserialize;
 
@@ -52,6 +52,35 @@ pub struct EffectTemplate {
 
 fn full_chance() -> f32 {
     1.0
+}
+
+/// RON-facing mirror of `game_core::LootKind` — kept separate for the same
+/// reason `EffectKindTemplate` mirrors `EffectKind`: content authors refer
+/// to items/runes by their template key (a plain `String`), not by an
+/// already-resolved engine type.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub enum LootKindTemplate {
+    Item(String),
+    Rune(String),
+}
+
+/// RON-facing mirror of `game_core::LootEntry`.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct LootEntryTemplate {
+    pub kind: LootKindTemplate,
+    pub weight: f32,
+}
+
+impl LootEntryTemplate {
+    fn into_entry(self) -> LootEntry {
+        LootEntry {
+            kind: match self.kind {
+                LootKindTemplate::Item(template_key) => LootKind::Item(template_key),
+                LootKindTemplate::Rune(rune_key) => LootKind::Rune(rune_key),
+            },
+            weight: self.weight,
+        }
+    }
 }
 
 impl EffectTemplate {
@@ -108,6 +137,15 @@ pub struct EnemyTemplate {
     /// content author always makes a conscious choice rather than an enemy
     /// silently granting nothing.
     pub xp_reward: f32,
+    /// Chance (0.0-1.0) this enemy drops anything at all on death — see
+    /// `game_core::roll_loot`. Optional: most enemies default to never
+    /// dropping rather than requiring every template to spell out zero.
+    #[serde(default)]
+    pub drop_chance: f32,
+    /// Weighted item/rune entries rolled if `drop_chance` hits. Optional:
+    /// empty means nothing to roll even if `drop_chance` were nonzero.
+    #[serde(default)]
+    pub loot_table: Vec<LootEntryTemplate>,
 }
 
 pub fn parse_enemy_template(ron_str: &str) -> ron::error::SpannedResult<EnemyTemplate> {
@@ -178,6 +216,15 @@ pub fn spawn_enemy(
         .cloned()
         .map(EffectTemplate::into_definition)
         .collect();
+    let loot_table = LootTable {
+        drop_chance: template.drop_chance,
+        entries: template
+            .loot_table
+            .iter()
+            .cloned()
+            .map(LootEntryTemplate::into_entry)
+            .collect(),
+    };
 
     commands
         .spawn((
@@ -206,6 +253,7 @@ pub fn spawn_enemy(
                 range: template.aggro_range,
             },
             XpReward(template.xp_reward),
+            loot_table,
         ))
         .id()
 }

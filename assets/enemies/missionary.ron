@@ -28,4 +28,10 @@
             applies_to: Target,
         ),
     ],
+    drop_chance: 0.5,
+    loot_table: [
+        (kind: Item("rusty_sword"), weight: 1.0),
+        (kind: Item("leather_armor"), weight: 1.0),
+        (kind: Rune("crit_shard"), weight: 2.0),
+    ],
 )

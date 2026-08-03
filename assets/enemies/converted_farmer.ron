@@ -29,4 +29,9 @@
             chance: 0.25,
         ),
     ],
+    drop_chance: 0.35,
+    loot_table: [
+        (kind: Item("wolf_pelt_cap"), weight: 1.0),
+        (kind: Rune("swift_shard"), weight: 2.0),
+    ],
 )

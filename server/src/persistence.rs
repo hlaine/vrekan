@@ -2,7 +2,10 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use game_core::{KnownSkills, Level, Stats, UnspentSkillPoints, UnspentStatPoints};
+use game_core::{
+    Equipment, Inventory, KnownSkills, Level, RuneInventory, Stats, UnspentSkillPoints,
+    UnspentStatPoints,
+};
 use serde::{Deserialize, Serialize};
 
 /// Per-game save data — currently just the shared password a connecting
@@ -26,6 +29,9 @@ pub struct CharacterSave {
     pub points: UnspentStatPoints,
     pub known_skills: KnownSkills,
     pub skill_points: UnspentSkillPoints,
+    pub inventory: Inventory,
+    pub equipment: Equipment,
+    pub runes: RuneInventory,
 }
 
 /// Mirrors `content::ContentError`'s shape — this is the same kind of
@@ -197,6 +203,9 @@ mod tests {
             points: UnspentStatPoints(2),
             known_skills: KnownSkills::default(),
             skill_points: UnspentSkillPoints(1),
+            inventory: Inventory::default(),
+            equipment: Equipment::default(),
+            runes: RuneInventory::default(),
         };
 
         save_character_save(&dir, "some_game", 777, &save).unwrap();

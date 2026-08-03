@@ -4,6 +4,7 @@ use bevy_ecs::prelude::*;
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
+use crate::item::{roll_loot, Equipment, ItemDrop, ItemLibrary, LootTable, RuneLibrary};
 use crate::movement::Position;
 use crate::player::{Downed, Player};
 use crate::progression::{grant_xp, Level, UnspentStatPoints, XpReward};
@@ -151,6 +152,7 @@ type Attackers<'w, 's> = Query<
         Option<&'static mut UnspentStatPoints>,
         Option<&'static mut UnspentSkillPoints>,
         Option<&'static mut Od>,
+        Option<&'static Equipment>,
     ),
     (Without<Downed>, Without<Stunned>),
 >;
@@ -203,6 +205,7 @@ pub fn attack_system(
     targets: AttackTargets,
     mut healths: Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     mut all_effects: Query<&mut ActiveEffects>,
+    runes: Res<RuneLibrary>,
 ) {
     let mut rng = rand::rng();
     for event in events.read() {
@@ -216,6 +219,7 @@ pub fn attack_system(
             attacker_stat_points,
             attacker_skill_points,
             attacker_od,
+            attacker_equipment,
         )) = attackers.get_mut(event.attacker)
         else {
             continue;
@@ -248,11 +252,19 @@ pub fn attack_system(
             else {
                 continue;
             };
+            let equipment_crit_chance = attacker_equipment
+                .map(|equipment| equipment.stat_bonus(Stat::CritChance, &runes))
+                .unwrap_or(0.0);
+            let equipment_crit_multiplier = attacker_equipment
+                .map(|equipment| equipment.stat_bonus(Stat::CritMultiplier, &runes))
+                .unwrap_or(0.0);
             let effective_stats = CombatStats {
                 crit_chance: attacker_stats.crit_chance
-                    + attacker_effects.stat_bonus(Stat::CritChance),
+                    + attacker_effects.stat_bonus(Stat::CritChance)
+                    + equipment_crit_chance,
                 crit_multiplier: attacker_stats.crit_multiplier
-                    + attacker_effects.stat_bonus(Stat::CritMultiplier),
+                    + attacker_effects.stat_bonus(Stat::CritMultiplier)
+                    + equipment_crit_multiplier,
             };
             let amount = resolve_damage(
                 melee.damage,
@@ -297,22 +309,47 @@ pub fn attack_system(
     }
 }
 
+/// `Position`/`LootTable` are only present on the dying entity to compute a
+/// loot roll and drop location — see `death_system`.
+type Dying<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Health,
+        Option<&'static Player>,
+        Option<&'static Position>,
+        Option<&'static LootTable>,
+    ),
+    Without<Downed>,
+>;
+
 /// A `Player` at zero health goes `Downed` instead of despawning — see
 /// MECHANICS.md's Death, downed state, and revive section. Everything else
 /// (enemies) despawns outright, same as before that state existed. The
 /// `Without<Downed>` filter keeps this from re-triggering every tick for a
 /// player who's already down.
-pub fn death_system(
-    mut commands: Commands,
-    query: Query<(Entity, &Health, Option<&Player>), Without<Downed>>,
-) {
-    for (entity, health, player) in &query {
+///
+/// A dying non-player entity with a `LootTable` gets one loot roll here,
+/// at the exact moment of despawn — not a separate system also watching
+/// for zero health, which would race against this one over which runs
+/// first (the same class of hazard `DECISIONS.md`'s disconnect-save entry
+/// solved via `On<Remove, _>` instead of a second observer). A roll that
+/// hits spawns a world-visible `ItemDrop` at the dying entity's position.
+pub fn death_system(mut commands: Commands, query: Dying, items: Res<ItemLibrary>) {
+    let mut rng = rand::rng();
+    for (entity, health, player, position, loot_table) in &query {
         if !health.is_dead() {
             continue;
         }
         if player.is_some() {
             commands.entity(entity).insert(Downed);
         } else {
+            if let (Some(position), Some(loot_table)) = (position, loot_table) {
+                if let Some(loot) = roll_loot(loot_table, &items, &mut rng) {
+                    commands.spawn((ItemDrop(loot), *position));
+                }
+            }
             commands.entity(entity).despawn();
         }
     }
@@ -442,6 +479,7 @@ mod tests {
     fn attack_system_damages_nearest_target_in_range_and_starts_cooldown() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -487,6 +525,7 @@ mod tests {
     fn attack_system_grants_xp_to_attacker_on_killing_blow() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -530,6 +569,7 @@ mod tests {
     fn attack_system_does_not_grant_xp_when_hit_is_not_lethal() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -585,6 +625,7 @@ mod tests {
     fn attack_system_always_applies_a_guaranteed_effect() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -625,6 +666,7 @@ mod tests {
     fn attack_system_never_applies_a_zero_chance_effect() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -665,6 +707,7 @@ mod tests {
     fn attack_system_ignores_requests_still_on_cooldown() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -704,6 +747,7 @@ mod tests {
     #[test]
     fn death_system_despawns_entities_at_zero_health() {
         let mut world = World::new();
+        world.init_resource::<ItemLibrary>();
         let alive = world.spawn(Health::new(10.0)).id();
         let dead = world.spawn(Health::new(0.0)).id();
 
@@ -716,6 +760,7 @@ mod tests {
     #[test]
     fn death_system_downs_a_player_instead_of_despawning() {
         let mut world = World::new();
+        world.init_resource::<ItemLibrary>();
         let player = world.spawn((Player, Health::new(0.0))).id();
 
         let _ = world.run_system_once(death_system);
@@ -727,6 +772,7 @@ mod tests {
     #[test]
     fn death_system_does_not_reprocess_an_already_downed_player() {
         let mut world = World::new();
+        world.init_resource::<ItemLibrary>();
         let player = world.spawn((Player, Downed, Health::new(0.0))).id();
 
         let _ = world.run_system_once(death_system);
@@ -738,6 +784,7 @@ mod tests {
     fn attack_system_ignores_a_downed_attacker() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -779,6 +826,7 @@ mod tests {
     fn attack_system_never_selects_a_downed_target() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -815,6 +863,7 @@ mod tests {
     fn attack_system_prevents_player_on_player_damage() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((
@@ -858,6 +907,7 @@ mod tests {
     fn attack_system_still_hits_an_enemy_past_a_nearer_teammate() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
 
         let attacker = world
             .spawn((

@@ -3,7 +3,8 @@ use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
-    Downed, Enemy, EnemyKind, Facing, Health, KnownSkills, Level, Od, Position, Stats, Stunned,
+    Downed, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health, Inventory, ItemDrop,
+    KnownSkills, Level, Od, Position, RuneInventory, Stats, Stunned,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,49 @@ pub struct ReviveInput {
 #[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CastSkillInput {
     pub skill_id: String,
+}
+
+/// Sent when the player presses the pickup button — picks up the nearest
+/// `ItemDrop` in range, same discrete-action/no-payload shape as
+/// `AttackInput`. A deliberate button-press rather than automatic
+/// walk-over pickup, matching `ReviveInput`'s existing "interact button"
+/// precedent rather than adding a new walk-over-triggers-automatically
+/// collision path.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PickupItemInput;
+
+/// Equips `inventory_index` from the player's own `Inventory` — no
+/// `EquipSlot` needed from the client, since the item's own template
+/// determines that server-side (see `game_core::equip_item`). Hotkey-
+/// driven client-side as a stand-in for the real inventory UI (M8), same
+/// pattern as M6's skill-cast hotkeys.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EquipItemInput {
+    pub inventory_index: usize,
+}
+
+/// Moves whatever's equipped at `slot` back into the inventory.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnequipItemInput {
+    pub slot: EquipSlot,
+}
+
+/// Sockets a rune (by content-file id, same "replicate a template key"
+/// shape as `CastSkillInput::skill_id`) from the player's `RuneInventory`
+/// into `equipment[slot]`'s socket at `socket_index`.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SocketRuneInput {
+    pub slot: EquipSlot,
+    pub socket_index: usize,
+    pub rune_id: String,
+}
+
+/// Free and reversible (see DECISIONS.md): pulls the rune at
+/// `equipment[slot]`'s socket back into the player's `RuneInventory`.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnsocketRuneInput {
+    pub slot: EquipSlot,
+    pub socket_index: usize,
 }
 
 /// Fixed size of netcode's connection-time `user_data` field (see
@@ -152,10 +196,19 @@ impl Plugin for NetworkPlugin {
             .replicate::<Stats>()
             .replicate::<Od>()
             .replicate::<KnownSkills>()
+            .replicate::<Inventory>()
+            .replicate::<Equipment>()
+            .replicate::<RuneInventory>()
+            .replicate::<ItemDrop>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable)
-            .add_client_message::<CastSkillInput>(Channel::Unreliable);
+            .add_client_message::<CastSkillInput>(Channel::Unreliable)
+            .add_client_message::<PickupItemInput>(Channel::Unreliable)
+            .add_client_message::<EquipItemInput>(Channel::Unreliable)
+            .add_client_message::<UnequipItemInput>(Channel::Unreliable)
+            .add_client_message::<SocketRuneInput>(Channel::Unreliable)
+            .add_client_message::<UnsocketRuneInput>(Channel::Unreliable);
     }
 }
 

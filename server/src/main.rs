@@ -20,7 +20,10 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
 };
-use content::{load_all_enemy_templates, load_all_skill_templates, spawn_enemy};
+use content::{
+    load_all_enemy_templates, load_all_item_templates, load_all_rune_templates,
+    load_all_skill_templates, spawn_enemy,
+};
 use game_core::combat::{
     attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, CombatStats,
     DamageType, Health, MeleeAttack,
@@ -28,15 +31,18 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    apply_death_xp_penalty, reset_xp_on_full_wipe, revive_system, skill_cast_system, tick_od_regen,
-    tick_skill_cooldowns, tick_status_effects, ActiveEffects, DeltaSeconds, Downed,
-    EffectDefinition, EffectKind, EffectTarget, Enemy, Facing, KnownSkills, Level, MoveSpeed, Od,
-    Player, Position, Reviving, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat,
-    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity,
+    apply_death_xp_penalty, equip_item, pickup_loot, reset_xp_on_full_wipe, revive_system,
+    skill_cast_system, socket_rune, tick_od_regen, tick_skill_cooldowns, tick_status_effects,
+    unequip_item, unsocket_rune, ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind,
+    EffectTarget, Enemy, Equipment, Facing, Inventory, ItemDrop, ItemLibrary, KnownSkills, Level,
+    MoveSpeed, Od, Player, Position, Reviving, RuneInventory, RuneLibrary, SkillCastRequested,
+    SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned, UnspentSkillPoints,
+    UnspentStatPoints, Velocity,
 };
 use protocol::{
-    AttackInput, CastSkillInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID,
-    SERVER_PORT,
+    AttackInput, CastSkillInput, ConnectAuth, EquipItemInput, MoveInput, NetworkPlugin,
+    PickupItemInput, ReviveInput, SocketRuneInput, UnequipItemInput, UnsocketRuneInput,
+    PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_SPEED: f32 = 200.0;
@@ -60,12 +66,18 @@ const PLAYER_FURY_CRIT_CHANCE_BONUS: f32 = 0.05;
 const PLAYER_FURY_DURATION_SECS: f32 = 3.0;
 const PLAYER_OD_MAX: f32 = 100.0;
 const PLAYER_OD_REGEN_RATE: f32 = 5.0;
+// How close a player needs to be to a dropped item/rune to pick it up —
+// tuned loosely against PLAYER_ATTACK_RANGE, not meant to require pixel
+// precision.
+const PICKUP_RANGE: f32 = 50.0;
 const MAX_CLIENTS: usize = 2;
 const TICK_RATE: f64 = 60.0;
 
 const MAP_PATH: &str = "assets/maps/valley.tmx";
 const SKILL_TEMPLATES_DIR: &str = "assets/spells";
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
+const ITEM_TEMPLATES_DIR: &str = "assets/items";
+const RUNE_TEMPLATES_DIR: &str = "assets/runes";
 // Enemies spawn in the map's bottom open field (rows 12-14, well clear of
 // the mountain band and the player's top-left spawn point) — see
 // assets/maps/valley.tmx and spawn_map_colliders' coordinate convention.
@@ -145,6 +157,7 @@ fn main() {
             (
                 load_game_password,
                 load_skills,
+                load_items,
                 setup,
                 spawn_map_colliders,
                 spawn_enemies,
@@ -153,12 +166,12 @@ fn main() {
         .add_systems(
             Update,
             (
-                // Split into two chained groups, not one flat tuple — Bevy's
+                // Split into chained groups, not one flat tuple — Bevy's
                 // `IntoSystemConfigs` tuple impl is only generated up to a
                 // fixed arity, and this pass pushed the total past it.
                 // Nesting still preserves the exact same overall ordering:
-                // the outer `.chain()` runs group one to completion before
-                // group two starts, same as one long chain would.
+                // the outer `.chain()` runs each group to completion before
+                // the next one starts, same as one long chain would.
                 (
                     update_delta_seconds,
                     apply_move_input,
@@ -184,6 +197,15 @@ fn main() {
                     apply_death_xp_penalty,
                     reset_xp_on_full_wipe,
                     revive_system,
+                )
+                    .chain(),
+                (
+                    tag_item_drops_for_replication,
+                    apply_pickup_input,
+                    apply_equip_input,
+                    apply_unequip_input,
+                    apply_socket_rune_input,
+                    apply_unsocket_rune_input,
                 )
                     .chain(),
             )
@@ -251,6 +273,32 @@ fn load_skills(mut commands: Commands) {
         .map(|(id, template)| (id, template.into_definition()))
         .collect();
     commands.insert_resource(SkillLibrary(library));
+}
+
+/// Loads item and rune templates into `Res<ItemLibrary>`/`Res<RuneLibrary>`
+/// — same "fail loudly before anyone connects" convention as
+/// `load_skills`/`spawn_enemies`. Both libraries are needed by
+/// `combat::attack_system`/`death_system` (equipment stat bonuses, loot
+/// rolls) even though no enemy template references an item/rune that
+/// doesn't exist — a bad reference would only surface as "nothing dropped"
+/// rather than a panic, since `roll_loot` treats an unknown template key as
+/// zero sockets rather than failing (see its doc comment).
+fn load_items(mut commands: Commands) {
+    let item_templates = load_all_item_templates(Path::new(ITEM_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load item templates: {error}"));
+    let items = item_templates
+        .into_iter()
+        .map(|(id, template)| (id, template.into_definition()))
+        .collect();
+    commands.insert_resource(ItemLibrary(items));
+
+    let rune_templates = load_all_rune_templates(Path::new(RUNE_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load rune templates: {error}"));
+    let runes = rune_templates
+        .into_iter()
+        .map(|(id, template)| (id, template.into_definition()))
+        .collect();
+    commands.insert_resource(RuneLibrary(runes));
 }
 
 /// Every connected client is represented as an entity with `ConnectedClient`;
@@ -344,7 +392,7 @@ fn on_client_connected(
         return;
     }
 
-    let (level, stats, points, known_skills, skill_points) =
+    let (level, stats, points, known_skills, skill_points, inventory, equipment, runes) =
         match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
             Ok(Some(save)) => {
                 if save.password != auth.character_password {
@@ -358,6 +406,9 @@ fn on_client_connected(
                     save.points,
                     save.known_skills,
                     save.skill_points,
+                    save.inventory,
+                    save.equipment,
+                    save.runes,
                 )
             }
             Ok(None) => {
@@ -368,6 +419,9 @@ fn on_client_connected(
                     points: UnspentStatPoints::default(),
                     known_skills: KnownSkills::default(),
                     skill_points: UnspentSkillPoints::default(),
+                    inventory: Inventory::default(),
+                    equipment: Equipment::default(),
+                    runes: RuneInventory::default(),
                 };
                 if let Err(error) = persistence::save_character_save(
                     saves_dir,
@@ -387,6 +441,9 @@ fn on_client_connected(
                     save.points,
                     save.known_skills,
                     save.skill_points,
+                    save.inventory,
+                    save.equipment,
+                    save.runes,
                 )
             }
             Err(error) => {
@@ -409,6 +466,9 @@ fn on_client_connected(
             skill_points,
             SkillCooldowns::default(),
             Od::new(PLAYER_OD_MAX, PLAYER_OD_REGEN_RATE),
+            inventory,
+            equipment,
+            runes,
         ),
         Position { x: 0.0, y: 0.0 },
         Facing::default(),
@@ -449,6 +509,24 @@ fn on_client_connected(
     ));
 }
 
+/// Everything persisted to a `CharacterSave` on disconnect — see
+/// `on_character_disconnected`.
+type PersistedCharacterData<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static CharacterId,
+        &'static Level,
+        &'static Stats,
+        &'static UnspentStatPoints,
+        &'static KnownSkills,
+        &'static UnspentSkillPoints,
+        &'static Inventory,
+        &'static Equipment,
+        &'static RuneInventory,
+    ),
+>;
+
 /// Persists a character's current `Level`/`Stats`/`UnspentStatPoints` back
 /// to its save file the moment they disconnect. Fires on `Remove` (which
 /// runs *before* the component is actually gone, so the rest of the
@@ -467,17 +545,19 @@ fn on_character_disconnected(
     remove: On<Remove, ConnectedClient>,
     mut active_characters: ResMut<ActiveCharacters>,
     game_id: Res<GameId>,
-    characters: Query<(
-        &CharacterId,
-        &Level,
-        &Stats,
-        &UnspentStatPoints,
-        &KnownSkills,
-        &UnspentSkillPoints,
-    )>,
+    characters: PersistedCharacterData,
 ) {
-    let Ok((character_id, level, stats, points, known_skills, skill_points)) =
-        characters.get(remove.entity)
+    let Ok((
+        character_id,
+        level,
+        stats,
+        points,
+        known_skills,
+        skill_points,
+        inventory,
+        equipment,
+        runes,
+    )) = characters.get(remove.entity)
     else {
         return;
     };
@@ -509,6 +589,9 @@ fn on_character_disconnected(
         points: *points,
         known_skills: known_skills.clone(),
         skill_points: *skill_points,
+        inventory: inventory.clone(),
+        equipment: equipment.clone(),
+        runes: runes.clone(),
     };
     if let Err(error) =
         persistence::save_character_save(saves_dir, &game_id.0, character_id.0, &save)
@@ -588,6 +671,18 @@ fn spawn_enemies(mut commands: Commands) {
     }
 }
 
+/// Tags a freshly-spawned `ItemDrop` (see `combat::death_system`'s loot
+/// roll) with `Replicated` — `game_core` has no `bevy_replicon` dependency
+/// (see `CLAUDE.md`'s crate boundaries), so it can't insert this marker
+/// itself the way `spawn_enemies`/`on_client_connected` do inline right
+/// after their own spawn call. A one-tick delay before a drop becomes
+/// network-visible is imperceptible and not worth avoiding.
+fn tag_item_drops_for_replication(mut commands: Commands, drops: Query<Entity, Added<ItemDrop>>) {
+    for entity in &drops {
+        commands.entity(entity).insert(Replicated);
+    }
+}
+
 /// Loads the map's "collision" object layer and spawns a static avian2d
 /// collider per polygon. Uses the plain `tiled` crate (not `bevy_ecs_tiled`)
 /// because `bevy_ecs_tiled` hard-depends on `bevy_render` regardless of
@@ -636,20 +731,33 @@ type MovablePlayers<'w, 's> = Query<
         &'static MoveSpeed,
         &'static mut LinearVelocity,
         &'static mut Facing,
+        Option<&'static Equipment>,
     ),
     (With<Player>, Without<Downed>, Without<Stunned>),
 >;
 
-fn apply_move_input(mut inputs: MessageReader<FromClient<MoveInput>>, mut players: MovablePlayers) {
+/// A socketed move-speed rune adds its bonus on top of the base
+/// `MoveSpeed`, computed fresh here rather than mutating the base
+/// component — same "never bake a buff into the base stat" principle as
+/// `combat::attack_system`'s equipment crit bonus.
+fn apply_move_input(
+    mut inputs: MessageReader<FromClient<MoveInput>>,
+    mut players: MovablePlayers,
+    runes: Res<RuneLibrary>,
+) {
     for input in inputs.read() {
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((speed, mut velocity, mut facing)) = players.get_mut(entity) else {
+        let Ok((speed, mut velocity, mut facing, equipment)) = players.get_mut(entity) else {
             continue;
         };
-        velocity.x = input.x * speed.0;
-        velocity.y = input.y * speed.0;
+        let equipment_bonus = equipment
+            .map(|equipment| equipment.stat_bonus(Stat::MoveSpeed, &runes))
+            .unwrap_or(0.0);
+        let effective_speed = speed.0 + equipment_bonus;
+        velocity.x = input.x * effective_speed;
+        velocity.y = input.y * effective_speed;
         facing.update_from_direction(input.x, input.y);
     }
 }
@@ -704,6 +812,129 @@ fn apply_revive_input(mut inputs: MessageReader<FromClient<ReviveInput>>, mut co
         } else {
             commands.entity(entity).remove::<Reviving>();
         }
+    }
+}
+
+/// Turns a client's `PickupItemInput` into a pickup of the nearest
+/// `ItemDrop` within `PICKUP_RANGE` — a deliberate button-press action, not
+/// automatic walk-over pickup (see `protocol::PickupItemInput`'s doc
+/// comment). Merges the drop's loot into the picker's own
+/// `Inventory`/`RuneInventory` via `game_core::pickup_loot`, then despawns
+/// the world-visible drop entity.
+fn apply_pickup_input(
+    mut inputs: MessageReader<FromClient<PickupItemInput>>,
+    mut players: Query<(&Position, &mut Inventory, &mut RuneInventory)>,
+    drops: Query<(Entity, &Position, &ItemDrop)>,
+    mut commands: Commands,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((player_pos, mut inventory, mut runes)) = players.get_mut(entity) else {
+            continue;
+        };
+        let nearest = drops
+            .iter()
+            .filter(|(_, pos, _)| player_pos.distance(pos) <= PICKUP_RANGE)
+            .min_by(|(_, a, _), (_, b, _)| {
+                player_pos.distance(a).total_cmp(&player_pos.distance(b))
+            });
+        let Some((drop_entity, _, drop)) = nearest else {
+            continue;
+        };
+        pickup_loot(&mut inventory, &mut runes, drop.0.clone());
+        commands.entity(drop_entity).despawn();
+    }
+}
+
+/// Turns a client's `EquipItemInput` into `game_core::equip_item`'s
+/// resolution against their own `Inventory`/`Equipment` — a no-op if the
+/// index or template is invalid (see that function's doc comment).
+fn apply_equip_input(
+    mut inputs: MessageReader<FromClient<EquipItemInput>>,
+    mut players: Query<(&mut Inventory, &mut Equipment)>,
+    items: Res<ItemLibrary>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut inventory, mut equipment)) = players.get_mut(entity) else {
+            continue;
+        };
+        equip_item(
+            &mut inventory,
+            &mut equipment,
+            &items,
+            input.inventory_index,
+        );
+    }
+}
+
+/// Turns a client's `UnequipItemInput` into `game_core::unequip_item`'s
+/// resolution — a no-op if nothing's equipped at that slot.
+fn apply_unequip_input(
+    mut inputs: MessageReader<FromClient<UnequipItemInput>>,
+    mut players: Query<(&mut Inventory, &mut Equipment)>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut inventory, mut equipment)) = players.get_mut(entity) else {
+            continue;
+        };
+        unequip_item(&mut inventory, &mut equipment, input.slot);
+    }
+}
+
+/// Turns a client's `SocketRuneInput` into `game_core::socket_rune`'s
+/// resolution — a no-op (see that function's doc comment) for any
+/// untrusted-input case: unknown rune, empty stack, missing item, bad
+/// socket index, or an already-occupied socket.
+fn apply_socket_rune_input(
+    mut inputs: MessageReader<FromClient<SocketRuneInput>>,
+    mut players: Query<(&mut Equipment, &mut RuneInventory)>,
+    runes: Res<RuneLibrary>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
+            continue;
+        };
+        socket_rune(
+            &mut equipment,
+            &mut rune_inventory,
+            &runes,
+            input.slot,
+            input.socket_index,
+            &input.rune_id,
+        );
+    }
+}
+
+/// Turns a client's `UnsocketRuneInput` into `game_core::unsocket_rune`'s
+/// resolution — free and reversible (see DECISIONS.md).
+fn apply_unsocket_rune_input(
+    mut inputs: MessageReader<FromClient<UnsocketRuneInput>>,
+    mut players: Query<(&mut Equipment, &mut RuneInventory)>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
+            continue;
+        };
+        unsocket_rune(
+            &mut equipment,
+            &mut rune_inventory,
+            input.slot,
+            input.socket_index,
+        );
     }
 }
 

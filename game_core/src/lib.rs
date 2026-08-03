@@ -1,5 +1,6 @@
 pub mod combat;
 pub mod enemy;
+pub mod item;
 pub mod movement;
 pub mod player;
 pub mod progression;
@@ -11,6 +12,11 @@ pub use combat::{
     AttackRequested, AttackTimer, CombatStats, DamageType, Health, MeleeAttack, Resistances,
 };
 pub use enemy::{Aggro, Enemy, EnemyKind};
+pub use item::{
+    equip_item, pickup_loot, roll_loot, socket_rune, unequip_item, unsocket_rune, DroppedLoot,
+    EquipSlot, Equipment, Inventory, Item, ItemDefinition, ItemDrop, ItemLibrary, LootEntry,
+    LootKind, LootTable, RuneDefinition, RuneInventory, RuneLibrary,
+};
 pub use movement::{leash_system, Facing, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
 pub use player::{Downed, Player};
 pub use progression::{

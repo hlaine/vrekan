@@ -18,14 +18,21 @@ use bevy_replicon_renet::{
 use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
-use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, Facing, Stunned, LEASH_DISTANCE};
+use game_core::{
+    DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Facing, ItemDrop, Stunned,
+    LEASH_DISTANCE,
+};
 use protocol::{
-    AttackInput, CastSkillInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID,
-    SERVER_PORT,
+    AttackInput, CastSkillInput, ConnectAuth, EquipItemInput, MoveInput, NetworkPlugin,
+    PickupItemInput, ReviveInput, SocketRuneInput, UnequipItemInput, UnsocketRuneInput,
+    PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
 const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
+const ITEM_DROP_COLOR: Color = Color::srgb(0.9, 0.8, 0.2);
+const RUNE_DROP_COLOR: Color = Color::srgb(0.6, 0.2, 0.9);
+const DROP_SPRITE_SIZE: f32 = 16.0;
 
 /// Fixed hotkey-to-skill-id mapping — a stand-in for the real skill-tree
 /// UI (M8), not a protocol concept: `CastSkillInput` carries the skill's
@@ -37,6 +44,32 @@ const SKILL_HOTKEYS: [(KeyCode, &str); 3] = [
     (KeyCode::Digit2, "aoe_burst"),
     (KeyCode::Digit3, "berserk"),
 ];
+
+/// Picks up the nearest dropped item/rune in range — a deliberate button
+/// press, not automatic walk-over pickup (see `protocol::PickupItemInput`).
+const PICKUP_KEY: KeyCode = KeyCode::KeyE;
+
+/// Equips inventory slot 0/1/2 — same hotkey-stand-in-for-UI shape as
+/// `SKILL_HOTKEYS`, on function keys so they don't collide with the skill
+/// hotkeys above.
+const EQUIP_KEYS: [KeyCode; 3] = [KeyCode::F1, KeyCode::F2, KeyCode::F3];
+
+/// Unequips whatever's in each slot back to the inventory.
+const UNEQUIP_KEYS: [(KeyCode, EquipSlot); 3] = [
+    (KeyCode::F4, EquipSlot::Weapon),
+    (KeyCode::F5, EquipSlot::Armor),
+    (KeyCode::F6, EquipSlot::Helmet),
+];
+
+/// Sockets/unsockets a rune into the weapon's first socket — hardcoded to
+/// one slot/index and the two rune ids this pass's content actually has,
+/// purely to make the socket/unsocket mechanic reachable and testable
+/// without a real UI; the server-side resolution
+/// (`game_core::socket_rune`/`unsocket_rune`) already supports any
+/// slot/index/rune combination.
+const SOCKET_CRIT_SHARD_KEY: KeyCode = KeyCode::F7;
+const SOCKET_SWIFT_SHARD_KEY: KeyCode = KeyCode::F8;
+const UNSOCKET_KEY: KeyCode = KeyCode::F9;
 
 // Only used to look up appearance (color/size) for a replicated enemy by
 // its `EnemyKind` — the server is what actually spawns/simulates enemies
@@ -139,6 +172,7 @@ fn main() {
                 update_delta_seconds,
                 init_replicated_players,
                 init_replicated_enemies,
+                init_replicated_item_drops,
                 player_input_system,
                 sync_transform_system,
                 party_camera_system,
@@ -291,10 +325,33 @@ fn init_replicated_enemies(
     }
 }
 
+/// Reacts to newly-replicated `ItemDrop`s (spawned server-side by
+/// `combat::death_system`'s loot roll — see `server`'s
+/// `tag_item_drops_for_replication`). Purely a placeholder visual (a small
+/// colored square distinguishing item vs. rune drops) until real item/rune
+/// sprites exist; there's no inventory/equipment UI yet either (M8), so
+/// this is just enough to make pickup/equip/socket testable live.
+fn init_replicated_item_drops(
+    mut commands: Commands,
+    new_drops: Query<(Entity, &ItemDrop), Added<ItemDrop>>,
+) {
+    for (entity, drop) in &new_drops {
+        let color = match drop.0 {
+            DroppedLoot::Item(_) => ITEM_DROP_COLOR,
+            DroppedLoot::Rune(_) => RUNE_DROP_COLOR,
+        };
+        commands.entity(entity).insert((
+            Sprite::from_color(color, Vec2::splat(DROP_SPRITE_SIZE)),
+            Transform::default(),
+        ));
+    }
+}
+
 fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
     delta.0 = time.delta_secs();
 }
 
+#[allow(clippy::too_many_arguments)] // one MessageWriter per input type, inherent to this system's job
 fn player_input_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     local_player: Res<LocalPlayer>,
@@ -302,6 +359,11 @@ fn player_input_system(
     mut attack_input: MessageWriter<AttackInput>,
     mut revive_input: MessageWriter<ReviveInput>,
     mut cast_skill_input: MessageWriter<CastSkillInput>,
+    mut pickup_input: MessageWriter<PickupItemInput>,
+    mut equip_input: MessageWriter<EquipItemInput>,
+    mut unequip_input: MessageWriter<UnequipItemInput>,
+    mut socket_rune_input: MessageWriter<SocketRuneInput>,
+    mut unsocket_rune_input: MessageWriter<UnsocketRuneInput>,
 ) {
     if local_player.0.is_none() {
         return;
@@ -342,6 +404,45 @@ fn player_input_system(
     revive_input.write(ReviveInput {
         held: keyboard.pressed(KeyCode::KeyF),
     });
+
+    if keyboard.just_pressed(PICKUP_KEY) {
+        pickup_input.write(PickupItemInput);
+    }
+
+    for (index, key) in EQUIP_KEYS.into_iter().enumerate() {
+        if keyboard.just_pressed(key) {
+            equip_input.write(EquipItemInput {
+                inventory_index: index,
+            });
+        }
+    }
+
+    for (key, slot) in UNEQUIP_KEYS {
+        if keyboard.just_pressed(key) {
+            unequip_input.write(UnequipItemInput { slot });
+        }
+    }
+
+    if keyboard.just_pressed(SOCKET_CRIT_SHARD_KEY) {
+        socket_rune_input.write(SocketRuneInput {
+            slot: EquipSlot::Weapon,
+            socket_index: 0,
+            rune_id: "crit_shard".to_string(),
+        });
+    }
+    if keyboard.just_pressed(SOCKET_SWIFT_SHARD_KEY) {
+        socket_rune_input.write(SocketRuneInput {
+            slot: EquipSlot::Weapon,
+            socket_index: 0,
+            rune_id: "swift_shard".to_string(),
+        });
+    }
+    if keyboard.just_pressed(UNSOCKET_KEY) {
+        unsocket_rune_input.write(UnsocketRuneInput {
+            slot: EquipSlot::Weapon,
+            socket_index: 0,
+        });
+    }
 }
 
 fn sync_transform_system(mut query: Query<(&Position, &mut Transform)>) {

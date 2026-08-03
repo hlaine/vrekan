@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{apply_damage, DamageType, Health, Resistances};
 use crate::DeltaSeconds;
 
-/// Which stat a `StatModifier` effect adjusts. A small fixed set — extend
-/// only once a new stat is actually wired up somewhere, not speculatively.
+/// Which stat a `StatModifier` effect (or, since M7, a socketed rune)
+/// adjusts. A small fixed set — extend only once a new stat is actually
+/// wired up somewhere, not speculatively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 pub enum Stat {
     CritChance,
     CritMultiplier,
+    MoveSpeed,
 }
 
 /// Same-effect-reapplied behavior, a per-effect data field rather than a
