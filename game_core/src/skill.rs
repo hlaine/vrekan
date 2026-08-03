@@ -127,8 +127,9 @@ pub struct UnspentSkillPoints(pub u32);
 /// Remaining cooldown, in seconds, per skill id currently on cooldown for
 /// this caster. Absence of an entry means "ready", not "zero cooldown" —
 /// `tick_skill_cooldowns` drops an entry entirely once it reaches zero,
-/// the same tick-then-drop shape as status-effect expiry.
-#[derive(Component, Debug, Default, Clone, PartialEq)]
+/// the same tick-then-drop shape as status-effect expiry. Replicated so the
+/// client HUD can show real cooldown countdowns (M8).
+#[derive(Component, Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillCooldowns(pub HashMap<String, f32>);
 
 pub fn tick_skill_cooldowns(delta: Res<DeltaSeconds>, mut query: Query<&mut SkillCooldowns>) {

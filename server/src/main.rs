@@ -732,14 +732,16 @@ type MovablePlayers<'w, 's> = Query<
         &'static mut LinearVelocity,
         &'static mut Facing,
         Option<&'static Equipment>,
+        Option<&'static Stats>,
     ),
     (With<Player>, Without<Downed>, Without<Stunned>),
 >;
 
-/// A socketed move-speed rune adds its bonus on top of the base
-/// `MoveSpeed`, computed fresh here rather than mutating the base
-/// component — same "never bake a buff into the base stat" principle as
-/// `combat::attack_system`'s equipment crit bonus.
+/// A socketed move-speed rune, and a manually-allocated `Stats` point spend,
+/// both add their bonus on top of the base `MoveSpeed`, computed fresh here
+/// rather than mutating the base component — same "never bake a buff into
+/// the base stat" principle as `combat::attack_system`'s equipment/level
+/// crit bonuses.
 fn apply_move_input(
     mut inputs: MessageReader<FromClient<MoveInput>>,
     mut players: MovablePlayers,
@@ -749,13 +751,15 @@ fn apply_move_input(
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((speed, mut velocity, mut facing, equipment)) = players.get_mut(entity) else {
+        let Ok((speed, mut velocity, mut facing, equipment, stats)) = players.get_mut(entity)
+        else {
             continue;
         };
         let equipment_bonus = equipment
             .map(|equipment| equipment.stat_bonus(Stat::MoveSpeed, &runes))
             .unwrap_or(0.0);
-        let effective_speed = speed.0 + equipment_bonus;
+        let level_bonus = stats.map(|stats| stats.bonus_move_speed).unwrap_or(0.0);
+        let effective_speed = speed.0 + equipment_bonus + level_bonus;
         velocity.x = input.x * effective_speed;
         velocity.y = input.y * effective_speed;
         facing.update_from_direction(input.x, input.y);

@@ -8,6 +8,7 @@ use bevy::camera::Projection;
 use bevy::gizmos::prelude::*;
 use bevy::prelude::*;
 use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
+use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::{
@@ -19,8 +20,8 @@ use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
-    DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Facing, ItemDrop, Stunned,
-    LEASH_DISTANCE,
+    DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Facing, Health, ItemDrop, Od,
+    SkillCooldowns, Stunned, LEASH_DISTANCE,
 };
 use protocol::{
     AttackInput, CastSkillInput, ConnectAuth, EquipItemInput, MoveInput, NetworkPlugin,
@@ -163,6 +164,7 @@ fn main() {
         .add_plugins((RepliconPlugins, RepliconRenetPlugins))
         .add_plugins(NetworkPlugin)
         .add_plugins(TiledPlugin::default())
+        .add_plugins(EguiPlugin::default())
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
         .add_systems(Startup, (setup_scene, connect_to_server))
@@ -178,6 +180,7 @@ fn main() {
                 party_camera_system,
                 player_appearance_system,
                 facing_indicator_system,
+                hud_system,
             )
                 .chain(),
         )
@@ -564,4 +567,72 @@ fn facing_indicator_system(query: Query<(&Position, &Facing)>, mut gizmos: Gizmo
         let end = start + Vec2::new(facing.x, facing.y) * FACING_ARROW_LENGTH;
         gizmos.arrow_2d(start, end, FACING_ARROW_COLOR);
     }
+}
+
+/// `Od`/`SkillCooldowns` are `Option` for the same reason as elsewhere —
+/// only players have either, and `SkillCooldowns` only gains an entry once
+/// a skill's actually been cast (see `game_core::skill`).
+type LocalPlayerHud<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Health,
+        Option<&'static Od>,
+        Option<&'static SkillCooldowns>,
+        Has<Downed>,
+    ),
+>;
+
+/// Read-only egui HUD: health/od bars, skill cooldowns, and a downed-state
+/// indicator. Skill rows use the existing fixed `1`-`3` hotkeys from M6
+/// (`SKILL_HOTKEYS`) rather than `KnownSkills` — the skill-tree UI that
+/// would ever populate `KnownSkills` with something other than "empty"
+/// doesn't exist yet (see ROADMAP.md's M8 step 6). First panel — nothing
+/// here is clickable, so no input-focus guard yet (that lands alongside
+/// the first interactive panel, ROADMAP.md's M8 step 4).
+fn hud_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, query: LocalPlayerHud) {
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok((health, od, skill_cooldowns, downed)) = query.get(entity) else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    egui::Window::new("hud")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
+        .show(ctx, |ui| {
+            ui.add(
+                egui::ProgressBar::new(health.current / health.max)
+                    .text(format!("HP {:.0}/{:.0}", health.current, health.max)),
+            );
+            if let Some(od) = od {
+                ui.add(
+                    egui::ProgressBar::new(od.current / od.max)
+                        .text(format!("Od {:.0}/{:.0}", od.current, od.max)),
+                );
+            }
+            if downed {
+                ui.colored_label(egui::Color32::RED, "DOWNED");
+            }
+
+            ui.separator();
+            for (index, (_, skill_id)) in SKILL_HOTKEYS.iter().enumerate() {
+                let remaining = skill_cooldowns
+                    .and_then(|cooldowns| cooldowns.0.get(*skill_id))
+                    .copied()
+                    .unwrap_or(0.0);
+                let label = if remaining > 0.0 {
+                    format!("{}: {skill_id} ({remaining:.1}s)", index + 1)
+                } else {
+                    format!("{}: {skill_id} ready", index + 1)
+                };
+                ui.label(label);
+            }
+        });
 }

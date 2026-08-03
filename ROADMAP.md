@@ -252,10 +252,12 @@ design writeup). Numbered here by practical build order, not importance —
 later steps depend on earlier ones landing first; a review pass before
 starting found two gaps folded in below (marked "found via review").
 
-1. [ ] `bevy_egui` added as a client-only dependency (named in `CLAUDE.md`'s
+1. [x] `bevy_egui` added as a client-only dependency (named in `CLAUDE.md`'s
   stack from the start; `=0.41.1`, verified compatible with the pinned
-  `bevy = "=0.19.0"`)
-2. [ ] Backend prep, no UI yet — makes the panels below meaningful the
+  `bevy = "=0.19.0"`). `EguiPlugin::default()` wired into `client`'s
+  `App`, no panels yet — confirmed the server's dependency tree stays
+  clean (`cargo tree -p server` has no `egui`).
+2. [x] Backend prep, no UI yet — makes the panels below meaningful the
   moment they exist instead of needing a follow-up fix:
    - Wire `Stats`' `bonus_move_speed`/`bonus_crit_chance`/
      `bonus_crit_multiplier` into combat/movement resolution, the same
@@ -266,13 +268,28 @@ starting found two gaps folded in below (marked "found via review").
      fields were completely unread anywhere in the codebase before this —
      the stat-allocation panel below would otherwise let a player spend
      points for zero gameplay effect, the exact gap M7 deliberately
-     avoided for item/rune bonuses.
+     avoided for item/rune bonuses. Wired into `combat::attack_system`'s
+     effective crit stats and `server`'s `apply_move_input`'s effective
+     speed, both computed fresh at point of use like `Equipment`'s
+     bonuses — never baked into the base component.
    - Replicate `AttackTimer`/`SkillCooldowns` (both server-only until
-     now) so the HUD can show real cooldown countdowns.
-3. [ ] egui HUD: health/od bars, skill cooldowns, downed-state indicator.
+     now) so the HUD can show real cooldown countdowns. Both gained
+     `Serialize`/`Deserialize` and a `.replicate::<T>()` registration in
+     `protocol`.
+3. [x] egui HUD: health/od bars, skill cooldowns, downed-state indicator.
   Skill icons use the existing fixed `1`-`3` hotkeys from M6, no new
-  input model. Read-only — first panel, no input-focus handling needed
-  yet.
+  input model — a text row per hotkey (id + remaining cooldown or
+  "ready"), not real icon art. Read-only — first panel, no input-focus
+  handling needed yet. Confirmed live: a two-terminal server+client
+  playtest, screenshotting the actual window, showed the panel
+  correctly rendering replicated `Health`/`Od` and an empty
+  `SkillCooldowns` (all three hotkeys "ready") over the running game
+  world. Didn't get a live screenshot of the downed-indicator branch
+  specifically (simulating a keypress to force it hit a macOS
+  Accessibility-permission wall mid-session) — that branch is a
+  one-line `if downed`, the same `Has<Downed>` pattern already proven
+  live elsewhere in `client` (`player_appearance_system`), not new
+  logic of its own.
 4. [ ] Input-focus guard (an `egui` pointer/keyboard-capture check —
   exact `bevy_egui` 0.41 method names to confirm during implementation),
   added alongside the first *interactive* panel next. Per `CLAUDE.md`,

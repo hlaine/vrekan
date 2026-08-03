@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::item::{roll_loot, Equipment, ItemDrop, ItemLibrary, LootTable, RuneLibrary};
 use crate::movement::Position;
 use crate::player::{Downed, Player};
-use crate::progression::{grant_xp, Level, UnspentStatPoints, XpReward};
+use crate::progression::{grant_xp, Level, Stats, UnspentStatPoints, XpReward};
 use crate::skill::{Od, UnspentSkillPoints};
 use crate::status_effect::{ActiveEffects, EffectDefinition, EffectTarget, Stat, Stunned};
 use crate::DeltaSeconds;
@@ -119,7 +119,8 @@ pub struct MeleeAttack {
 }
 
 /// Seconds remaining before this entity can attack again; `0.0` means ready.
-#[derive(Component, Debug, Default, Clone, Copy, PartialEq)]
+/// Replicated so the client HUD can show a real cooldown countdown (M8).
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AttackTimer(pub f32);
 
 #[derive(Message, Debug, Clone, Copy)]
@@ -139,6 +140,8 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
 /// only players have them — used to grant XP on a killing blow, see
 /// `attack_system`. `Od` is likewise `Option` (only players have a resource
 /// pool) — a landed hit grants a bonus regardless of whether it kills.
+/// `Stats` (manually-allocated level-up points) is `Option` for the same
+/// reason as `Equipment` — only players have either.
 type Attackers<'w, 's> = Query<
     'w,
     's,
@@ -153,6 +156,7 @@ type Attackers<'w, 's> = Query<
         Option<&'static mut UnspentSkillPoints>,
         Option<&'static mut Od>,
         Option<&'static Equipment>,
+        Option<&'static Stats>,
     ),
     (Without<Downed>, Without<Stunned>),
 >;
@@ -220,6 +224,7 @@ pub fn attack_system(
             attacker_skill_points,
             attacker_od,
             attacker_equipment,
+            attacker_level_stats,
         )) = attackers.get_mut(event.attacker)
         else {
             continue;
@@ -258,13 +263,21 @@ pub fn attack_system(
             let equipment_crit_multiplier = attacker_equipment
                 .map(|equipment| equipment.stat_bonus(Stat::CritMultiplier, &runes))
                 .unwrap_or(0.0);
+            let level_crit_chance = attacker_level_stats
+                .map(|stats| stats.bonus_crit_chance)
+                .unwrap_or(0.0);
+            let level_crit_multiplier = attacker_level_stats
+                .map(|stats| stats.bonus_crit_multiplier)
+                .unwrap_or(0.0);
             let effective_stats = CombatStats {
                 crit_chance: attacker_stats.crit_chance
                     + attacker_effects.stat_bonus(Stat::CritChance)
-                    + equipment_crit_chance,
+                    + equipment_crit_chance
+                    + level_crit_chance,
                 crit_multiplier: attacker_stats.crit_multiplier
                     + attacker_effects.stat_bonus(Stat::CritMultiplier)
-                    + equipment_crit_multiplier,
+                    + equipment_crit_multiplier
+                    + level_crit_multiplier,
             };
             let amount = resolve_damage(
                 melee.damage,
@@ -519,6 +532,54 @@ mod tests {
         assert_eq!(world.get::<Health>(near_target).unwrap().current, 20.0);
         assert_eq!(world.get::<Health>(far_target).unwrap().current, 30.0);
         assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 1.0);
+    }
+
+    #[test]
+    fn attack_system_applies_stats_bonus_crit_chance_and_multiplier() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+                Stats {
+                    bonus_crit_chance: 1.0,
+                    bonus_crit_multiplier: 1.0,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(100.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        // base crit_chance 0.0 + bonus 1.0 = guaranteed crit; base
+        // crit_multiplier 1.0 + bonus 1.0 = x2 — 10.0 * 2.0 = 20.0 damage.
+        assert_eq!(world.get::<Health>(target).unwrap().current, 80.0);
     }
 
     #[test]
