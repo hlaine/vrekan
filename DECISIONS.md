@@ -795,3 +795,44 @@ write only logs an error and rejects/skips that one character, never
 crashing the server for everyone else already connected — deliberately not
 the same panic-on-malformed-content treatment, since per-character I/O
 failure is a recoverable, isolated case, not a startup-time invariant.
+
+---
+
+## XP-on-death penalty hooks `Added<Downed>`; found a `run_system_once` testing gotcha (M5)
+
+**Context:** M5's last item, the XP-on-death penalty, needed to fire
+exactly once per downing (not every tick a player stays downed) and needed
+a separate full-party-wipe check that resets everyone's in-level XP to
+zero rather than stacking with the individual penalty — see
+`MECHANICS.md`'s Progression section.
+
+**Decision:** `apply_death_xp_penalty` queries `Added<Downed>` rather than
+having `death_system` (in `combat.rs`) call into progression code directly
+— `death_system` stays entirely ignorant of XP/leveling, and the "exactly
+once" guarantee comes for free from Bevy's own change detection instead of
+manual bookkeeping. `reset_xp_on_full_wipe` runs unconditionally every
+tick and just re-zeroes an already-zero value once the wipe condition
+holds, rather than trying to detect the precise transition tick — simpler,
+and reapplying zero is a harmless no-op.
+
+**Found while writing the test, not live play — `run_system_once` doesn't
+carry `Added<T>` state between calls.** The first version of
+`death_penalty_only_applies_once_at_the_moment_of_downing` called
+`world.run_system_once(apply_death_xp_penalty)` twice and expected the
+second call to see `Added<Downed>` as false. It didn't: each
+`run_system_once` builds a fresh, stateless system with no memory of a
+prior invocation, so change-detection "last run" tracking never
+accumulates between separate calls — the second call still saw the
+component as newly-added and reapplied the penalty (xp landed on 64.0, not
+80.0). Fixed by using a persistent `Schedule` (`schedule.add_systems(...)`
++ two `schedule.run(&mut world)` calls on the same `World`), which does
+preserve each system's last-run tick across calls, matching how the system
+actually behaves across real ticks in the server's schedule.
+
+**Consequences:** Any future `game_core` test asserting "a system's
+`Added`/`Changed` behavior differs across two runs" needs a `Schedule` run
+twice, not two separate `run_system_once` calls — the latter will silently
+test the wrong thing (every call looking like "first ever run") rather
+than failing to compile or erroring obviously. `run_system_once` stays
+fine for the common case of "run this system once and check the result,"
+just not for change-detection-across-ticks assertions specifically.

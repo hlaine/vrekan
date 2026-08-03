@@ -161,13 +161,17 @@ Claude Code tasks as you start it, not all upfront.
   (MECHANICS.md itself defers that to M8) — points accumulate unspent,
   `Stats`' bonuses have no gameplay effect until something can produce a
   nonzero value.
-- [ ] XP penalty on individual death; full-party-wipe resets in-level
-  progress to zero (level itself never drops) — see `MECHANICS.md`. Not
-  yet built — follow-up task.
-- [ ] Resurrection-point checkpointing (auto-updates at dungeon entry /
-  objectives); full-wipe auto-respawn there. Not yet built — also has a
-  forward-dependency on M9's dungeon/objective triggers, which don't
-  exist yet.
+- [x] XP penalty on individual death; full-party-wipe resets in-level
+  progress to zero (level itself never drops) — see `MECHANICS.md`.
+  `game_core::progression::apply_death_xp_penalty` fires on `Added<Downed>`
+  (once per downing, not every tick they stay downed) and reduces `xp` by
+  a fixed fraction (20%, tuning data) — never touches `level`, so the
+  "floors at the current level" rule holds with no separate clamp needed.
+  `reset_xp_on_full_wipe` checks every tick whether every connected player
+  is currently `Downed`; if so, zeroes everyone's `xp` — this supersedes
+  the individual penalty for whoever was downed last rather than stacking
+  with it, matching a wipe being its own outcome. Both run right after
+  `death_system` in the server schedule.
 - [x] Server-authoritative, persisted per character. Save format: RON
   files under `saves/<game_id>/` (`server::persistence` — `GameSave`,
   `CharacterSave`), reusing the same `Level`/`Stats`/`UnspentStatPoints`
@@ -217,6 +221,11 @@ Claude Code tasks as you start it, not all upfront.
 - [ ] Neutral (unkillable) character type
 - [ ] Boss mechanics: phases, enrage timer, arena bounds — see
   `MECHANICS.md`; first boss encounter as part of this dungeon
+- [ ] Resurrection-point checkpointing (auto-updates at dungeon entry /
+  objectives); full-wipe auto-respawn there — see `MECHANICS.md`'s
+  Progression section. Moved here from M5: this needs the dungeon-entry/
+  objective triggers this milestone actually builds, which didn't exist
+  when M5's XP/persistence work landed.
 
 ## M10 — Polish pass
 - [ ] Splash/title screen
