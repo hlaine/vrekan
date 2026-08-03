@@ -20,11 +20,23 @@ use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, Facing, Stunned, LEASH_DISTANCE};
 use protocol::{
-    AttackInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT,
+    AttackInput, CastSkillInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID,
+    SERVER_PORT,
 };
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
 const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
+
+/// Fixed hotkey-to-skill-id mapping — a stand-in for the real skill-tree
+/// UI (M8), not a protocol concept: `CastSkillInput` carries the skill's
+/// content-file id directly (see its doc comment), so this table is purely
+/// a client-side input convenience that a future UI replaces with actual
+/// clicks, not something the server or wire format needs to know about.
+const SKILL_HOTKEYS: [(KeyCode, &str); 3] = [
+    (KeyCode::Digit1, "power_strike"),
+    (KeyCode::Digit2, "aoe_burst"),
+    (KeyCode::Digit3, "berserk"),
+];
 
 // Only used to look up appearance (color/size) for a replicated enemy by
 // its `EnemyKind` — the server is what actually spawns/simulates enemies
@@ -289,6 +301,7 @@ fn player_input_system(
     mut move_input: MessageWriter<MoveInput>,
     mut attack_input: MessageWriter<AttackInput>,
     mut revive_input: MessageWriter<ReviveInput>,
+    mut cast_skill_input: MessageWriter<CastSkillInput>,
 ) {
     if local_player.0.is_none() {
         return;
@@ -316,6 +329,14 @@ fn player_input_system(
 
     if keyboard.just_pressed(KeyCode::Space) {
         attack_input.write(AttackInput);
+    }
+
+    for (key, skill_id) in SKILL_HOTKEYS {
+        if keyboard.just_pressed(key) {
+            cast_skill_input.write(CastSkillInput {
+                skill_id: skill_id.to_string(),
+            });
+        }
     }
 
     revive_input.write(ReviveInput {

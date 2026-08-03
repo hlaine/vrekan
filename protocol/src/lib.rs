@@ -2,7 +2,9 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
-use game_core::{Downed, Enemy, EnemyKind, Facing, Health, Level, Position, Stats, Stunned};
+use game_core::{
+    Downed, Enemy, EnemyKind, Facing, Health, KnownSkills, Level, Od, Position, Stats, Stunned,
+};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
@@ -46,6 +48,18 @@ pub struct AttackInput;
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReviveInput {
     pub held: bool,
+}
+
+/// Sent when the player presses a skill's cast button — carries the
+/// skill's content-file id directly (e.g. `"power_strike"`), not a slot
+/// index, so a new skill is just a new content file, never a protocol
+/// change (same "replicate a content-template key, not template data"
+/// precedent as `EnemyKind`, see DECISIONS.md). Same occasionally-dropped,
+/// unreliable-channel treatment as `AttackInput`/`ReviveInput` — a dropped
+/// cast attempt just doesn't fire, no different from a dropped attack.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CastSkillInput {
+    pub skill_id: String,
 }
 
 /// Fixed size of netcode's connection-time `user_data` field (see
@@ -136,9 +150,12 @@ impl Plugin for NetworkPlugin {
             .replicate::<Stunned>()
             .replicate::<Level>()
             .replicate::<Stats>()
+            .replicate::<Od>()
+            .replicate::<KnownSkills>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
-            .add_client_message::<ReviveInput>(Channel::Unreliable);
+            .add_client_message::<ReviveInput>(Channel::Unreliable)
+            .add_client_message::<CastSkillInput>(Channel::Unreliable);
     }
 }
 

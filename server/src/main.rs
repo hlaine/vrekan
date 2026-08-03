@@ -20,7 +20,7 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
 };
-use content::{load_all_enemy_templates, spawn_enemy};
+use content::{load_all_enemy_templates, load_all_skill_templates, spawn_enemy};
 use game_core::combat::{
     attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, CombatStats,
     DamageType, Health, MeleeAttack,
@@ -28,13 +28,15 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    apply_death_xp_penalty, reset_xp_on_full_wipe, revive_system, tick_status_effects,
-    ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy, Facing,
-    Level, MoveSpeed, Player, Position, Reviving, StackMode, Stat, Stats, Stunned,
-    UnspentStatPoints, Velocity,
+    apply_death_xp_penalty, reset_xp_on_full_wipe, revive_system, skill_cast_system, tick_od_regen,
+    tick_skill_cooldowns, tick_status_effects, ActiveEffects, DeltaSeconds, Downed,
+    EffectDefinition, EffectKind, EffectTarget, Enemy, Facing, KnownSkills, Level, MoveSpeed, Od,
+    Player, Position, Reviving, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat,
+    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity,
 };
 use protocol::{
-    AttackInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT,
+    AttackInput, CastSkillInput, ConnectAuth, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID,
+    SERVER_PORT,
 };
 
 const PLAYER_SPEED: f32 = 200.0;
@@ -56,10 +58,13 @@ const PLAYER_CRIT_MULTIPLIER: f32 = 1.5;
 const PLAYER_FURY_ID: &str = "fury";
 const PLAYER_FURY_CRIT_CHANCE_BONUS: f32 = 0.05;
 const PLAYER_FURY_DURATION_SECS: f32 = 3.0;
+const PLAYER_OD_MAX: f32 = 100.0;
+const PLAYER_OD_REGEN_RATE: f32 = 5.0;
 const MAX_CLIENTS: usize = 2;
 const TICK_RATE: f64 = 60.0;
 
 const MAP_PATH: &str = "assets/maps/valley.tmx";
+const SKILL_TEMPLATES_DIR: &str = "assets/spells";
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 // Enemies spawn in the map's bottom open field (rows 12-14, well clear of
 // the mountain band and the player's top-left spawn point) — see
@@ -134,10 +139,12 @@ fn main() {
         .init_resource::<DeltaSeconds>()
         .init_resource::<ActiveCharacters>()
         .add_message::<AttackRequested>()
+        .add_message::<SkillCastRequested>()
         .add_systems(
             Startup,
             (
                 load_game_password,
+                load_skills,
                 setup,
                 spawn_map_colliders,
                 spawn_enemies,
@@ -146,23 +153,39 @@ fn main() {
         .add_systems(
             Update,
             (
-                update_delta_seconds,
-                apply_move_input,
-                apply_attack_input,
-                apply_revive_input,
-                freeze_incapacitated_players,
-                sync_physics_position_to_game_core,
-                leash_system,
-                sync_game_core_position_to_physics,
-                ai_system,
-                sync_enemy_velocity_to_physics,
-                tick_attack_timers,
-                attack_system,
-                tick_status_effects,
-                death_system,
-                apply_death_xp_penalty,
-                reset_xp_on_full_wipe,
-                revive_system,
+                // Split into two chained groups, not one flat tuple — Bevy's
+                // `IntoSystemConfigs` tuple impl is only generated up to a
+                // fixed arity, and this pass pushed the total past it.
+                // Nesting still preserves the exact same overall ordering:
+                // the outer `.chain()` runs group one to completion before
+                // group two starts, same as one long chain would.
+                (
+                    update_delta_seconds,
+                    apply_move_input,
+                    apply_attack_input,
+                    apply_skill_cast_input,
+                    apply_revive_input,
+                    freeze_incapacitated_players,
+                    sync_physics_position_to_game_core,
+                    leash_system,
+                    sync_game_core_position_to_physics,
+                    ai_system,
+                )
+                    .chain(),
+                (
+                    sync_enemy_velocity_to_physics,
+                    tick_attack_timers,
+                    tick_od_regen,
+                    tick_skill_cooldowns,
+                    attack_system,
+                    skill_cast_system,
+                    tick_status_effects,
+                    death_system,
+                    apply_death_xp_penalty,
+                    reset_xp_on_full_wipe,
+                    revive_system,
+                )
+                    .chain(),
             )
                 .chain(),
         )
@@ -212,6 +235,22 @@ fn load_game_password(mut commands: Commands, game_id: Res<GameId>) {
     let existing = persistence::load_game_save(Path::new(SAVES_DIR), &game_id.0)
         .unwrap_or_else(|error| panic!("failed to load game save: {error}"));
     commands.insert_resource(GamePassword(existing.map(|save| save.password)));
+}
+
+/// Loads every skill template into a `Res<SkillLibrary>`, looked up by id
+/// at cast time (see `game_core::skill_cast_system`) — unlike enemy
+/// templates, a skill's definition isn't spawned onto an entity once, so
+/// it needs to stay around as a resource rather than being consumed at
+/// Startup. A malformed file panics here, same "fail loudly before anyone
+/// connects" convention as `spawn_enemies`/`spawn_map_colliders`.
+fn load_skills(mut commands: Commands) {
+    let templates = load_all_skill_templates(Path::new(SKILL_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load skill templates: {error}"));
+    let library = templates
+        .into_iter()
+        .map(|(id, template)| (id, template.into_definition()))
+        .collect();
+    commands.insert_resource(SkillLibrary(library));
 }
 
 /// Every connected client is represented as an entity with `ConnectedClient`;
@@ -305,7 +344,7 @@ fn on_client_connected(
         return;
     }
 
-    let (level, stats, points) =
+    let (level, stats, points, known_skills, skill_points) =
         match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
             Ok(Some(save)) => {
                 if save.password != auth.character_password {
@@ -313,7 +352,13 @@ fn on_client_connected(
                     server.disconnect(client_id);
                     return;
                 }
-                (save.level, save.stats, save.points)
+                (
+                    save.level,
+                    save.stats,
+                    save.points,
+                    save.known_skills,
+                    save.skill_points,
+                )
             }
             Ok(None) => {
                 let save = persistence::CharacterSave {
@@ -321,6 +366,8 @@ fn on_client_connected(
                     level: Level::default(),
                     stats: Stats::default(),
                     points: UnspentStatPoints::default(),
+                    known_skills: KnownSkills::default(),
+                    skill_points: UnspentSkillPoints::default(),
                 };
                 if let Err(error) = persistence::save_character_save(
                     saves_dir,
@@ -334,7 +381,13 @@ fn on_client_connected(
                     server.disconnect(client_id);
                     return;
                 }
-                (save.level, save.stats, save.points)
+                (
+                    save.level,
+                    save.stats,
+                    save.points,
+                    save.known_skills,
+                    save.skill_points,
+                )
             }
             Err(error) => {
                 error!("rejecting client {client_id}: failed to load character save: {error}");
@@ -351,6 +404,12 @@ fn on_client_connected(
         level,
         stats,
         points,
+        (
+            known_skills,
+            skill_points,
+            SkillCooldowns::default(),
+            Od::new(PLAYER_OD_MAX, PLAYER_OD_REGEN_RATE),
+        ),
         Position { x: 0.0, y: 0.0 },
         Facing::default(),
         MoveSpeed(PLAYER_SPEED),
@@ -408,9 +467,18 @@ fn on_character_disconnected(
     remove: On<Remove, ConnectedClient>,
     mut active_characters: ResMut<ActiveCharacters>,
     game_id: Res<GameId>,
-    characters: Query<(&CharacterId, &Level, &Stats, &UnspentStatPoints)>,
+    characters: Query<(
+        &CharacterId,
+        &Level,
+        &Stats,
+        &UnspentStatPoints,
+        &KnownSkills,
+        &UnspentSkillPoints,
+    )>,
 ) {
-    let Ok((character_id, level, stats, points)) = characters.get(remove.entity) else {
+    let Ok((character_id, level, stats, points, known_skills, skill_points)) =
+        characters.get(remove.entity)
+    else {
         return;
     };
     active_characters.0.remove(&character_id.0);
@@ -439,6 +507,8 @@ fn on_character_disconnected(
         level: *level,
         stats: *stats,
         points: *points,
+        known_skills: known_skills.clone(),
+        skill_points: *skill_points,
     };
     if let Err(error) =
         persistence::save_character_save(saves_dir, &game_id.0, character_id.0, &save)
@@ -597,6 +667,25 @@ fn apply_attack_input(
             continue;
         };
         attack_events.write(AttackRequested { attacker: entity });
+    }
+}
+
+/// Turns a client's `CastSkillInput` into a `SkillCastRequested` event for
+/// their own player entity — `skill_cast_system` resolves whether the skill
+/// is actually known, off cooldown, and affordable from there, same
+/// division of labor as `apply_attack_input`/`attack_system`.
+fn apply_skill_cast_input(
+    mut inputs: MessageReader<FromClient<CastSkillInput>>,
+    mut cast_events: MessageWriter<SkillCastRequested>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        cast_events.write(SkillCastRequested {
+            caster: entity,
+            skill_id: input.skill_id.clone(),
+        });
     }
 }
 

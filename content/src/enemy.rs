@@ -55,7 +55,7 @@ fn full_chance() -> f32 {
 }
 
 impl EffectTemplate {
-    fn into_definition(self) -> EffectDefinition {
+    pub(crate) fn into_definition(self) -> EffectDefinition {
         EffectDefinition {
             id: self.id,
             kind: match self.kind {

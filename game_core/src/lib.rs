@@ -4,6 +4,7 @@ pub mod movement;
 pub mod player;
 pub mod progression;
 pub mod revive;
+pub mod skill;
 pub mod status_effect;
 
 pub use combat::{
@@ -17,6 +18,10 @@ pub use progression::{
     UnspentStatPoints, XpReward,
 };
 pub use revive::{revive_system, Reviving};
+pub use skill::{
+    skill_cast_system, tick_od_regen, tick_skill_cooldowns, KnownSkills, Od, SkillCastRequested,
+    SkillCooldowns, SkillDefinition, SkillKind, SkillLibrary, UnspentSkillPoints,
+};
 pub use status_effect::{
     tick_status_effects, ActiveEffects, EffectDefinition, EffectKind, EffectTarget, StackMode,
     Stat, Stunned,

@@ -2,6 +2,7 @@ use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::player::{Downed, Player};
+use crate::skill::UnspentSkillPoints;
 
 /// Character level and progress toward the next one. See MECHANICS.md's
 /// Progression section for the death-penalty rules `apply_death_xp_penalty`
@@ -59,18 +60,28 @@ pub fn xp_required(level: u32) -> f32 {
     XP_BASE * (level as f32).powf(XP_GROWTH_EXPONENT)
 }
 
-/// Stat points granted per level gained. Tuning data, not a settled number.
+/// Stat/skill points granted per level gained. Tuning data, not settled
+/// numbers.
 const STAT_POINTS_PER_LEVEL: u32 = 3;
+const SKILL_POINTS_PER_LEVEL: u32 = 1;
 
 /// Grants `amount` XP, leveling up as many times as the total covers — a
 /// single large grant can cross several level thresholds at once, not just
-/// the next one.
-pub fn grant_xp(level: &mut Level, points: &mut UnspentStatPoints, amount: f32) {
+/// the next one. Awards both stat and skill points per level, same
+/// "accumulate now, spend later" shape (see `UnspentStatPoints`/
+/// `UnspentSkillPoints`'s doc comments — both wait on M8 UI to spend).
+pub fn grant_xp(
+    level: &mut Level,
+    stat_points: &mut UnspentStatPoints,
+    skill_points: &mut UnspentSkillPoints,
+    amount: f32,
+) {
     level.xp += amount;
     while level.xp >= xp_required(level.level) {
         level.xp -= xp_required(level.level);
         level.level += 1;
-        points.0 += STAT_POINTS_PER_LEVEL;
+        stat_points.0 += STAT_POINTS_PER_LEVEL;
+        skill_points.0 += SKILL_POINTS_PER_LEVEL;
     }
 }
 
@@ -127,39 +138,50 @@ mod tests {
     #[test]
     fn grant_xp_accumulates_without_leveling_when_insufficient() {
         let mut level = Level::default();
-        let mut points = UnspentStatPoints::default();
+        let mut stat_points = UnspentStatPoints::default();
+        let mut skill_points = UnspentSkillPoints::default();
 
-        grant_xp(&mut level, &mut points, 10.0);
+        grant_xp(&mut level, &mut stat_points, &mut skill_points, 10.0);
 
         assert_eq!(level.level, 1);
         assert_eq!(level.xp, 10.0);
-        assert_eq!(points.0, 0);
+        assert_eq!(stat_points.0, 0);
+        assert_eq!(skill_points.0, 0);
     }
 
     #[test]
     fn grant_xp_levels_up_once_and_carries_over_remainder() {
         let mut level = Level::default();
-        let mut points = UnspentStatPoints::default();
+        let mut stat_points = UnspentStatPoints::default();
+        let mut skill_points = UnspentSkillPoints::default();
         let required = xp_required(1);
 
-        grant_xp(&mut level, &mut points, required + 25.0);
+        grant_xp(
+            &mut level,
+            &mut stat_points,
+            &mut skill_points,
+            required + 25.0,
+        );
 
         assert_eq!(level.level, 2);
         assert!((level.xp - 25.0).abs() < 1e-4);
-        assert_eq!(points.0, STAT_POINTS_PER_LEVEL);
+        assert_eq!(stat_points.0, STAT_POINTS_PER_LEVEL);
+        assert_eq!(skill_points.0, SKILL_POINTS_PER_LEVEL);
     }
 
     #[test]
     fn grant_xp_handles_multiple_level_ups_in_one_grant() {
         let mut level = Level::default();
-        let mut points = UnspentStatPoints::default();
+        let mut stat_points = UnspentStatPoints::default();
+        let mut skill_points = UnspentSkillPoints::default();
         let huge_amount = xp_required(1) + xp_required(2) + xp_required(3) + 5.0;
 
-        grant_xp(&mut level, &mut points, huge_amount);
+        grant_xp(&mut level, &mut stat_points, &mut skill_points, huge_amount);
 
         assert_eq!(level.level, 4);
         assert!((level.xp - 5.0).abs() < 1e-4);
-        assert_eq!(points.0, STAT_POINTS_PER_LEVEL * 3);
+        assert_eq!(stat_points.0, STAT_POINTS_PER_LEVEL * 3);
+        assert_eq!(skill_points.0, SKILL_POINTS_PER_LEVEL * 3);
     }
 
     #[test]

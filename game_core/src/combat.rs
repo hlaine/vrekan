@@ -7,8 +7,15 @@ use serde::{Deserialize, Serialize};
 use crate::movement::Position;
 use crate::player::{Downed, Player};
 use crate::progression::{grant_xp, Level, UnspentStatPoints, XpReward};
+use crate::skill::{Od, UnspentSkillPoints};
 use crate::status_effect::{ActiveEffects, EffectDefinition, EffectTarget, Stat, Stunned};
 use crate::DeltaSeconds;
+
+/// Bonus `Od` granted to the attacker on any landed hit (kill or not) — the
+/// "combat/action-generated" half of MECHANICS.md's dual regeneration, the
+/// other half being `skill::tick_od_regen`'s passive trickle. Tuning data,
+/// not a settled number.
+const OD_GAIN_PER_HIT: f32 = 5.0;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Health {
@@ -127,8 +134,10 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
 }
 
 /// A downed or stunned entity can't attack — see `attack_system`. The
-/// `Level`/`UnspentStatPoints` pair is `Option` since only players have
-/// them — used to grant XP on a killing blow, see `attack_system`.
+/// `Level`/`UnspentStatPoints`/`UnspentSkillPoints` triple is `Option` since
+/// only players have them — used to grant XP on a killing blow, see
+/// `attack_system`. `Od` is likewise `Option` (only players have a resource
+/// pool) — a landed hit grants a bonus regardless of whether it kills.
 type Attackers<'w, 's> = Query<
     'w,
     's,
@@ -140,6 +149,8 @@ type Attackers<'w, 's> = Query<
         Has<Player>,
         Option<&'static mut Level>,
         Option<&'static mut UnspentStatPoints>,
+        Option<&'static mut UnspentSkillPoints>,
+        Option<&'static mut Od>,
     ),
     (Without<Downed>, Without<Stunned>),
 >;
@@ -202,7 +213,9 @@ pub fn attack_system(
             mut timer,
             attacker_is_player,
             attacker_level,
-            attacker_points,
+            attacker_stat_points,
+            attacker_skill_points,
+            attacker_od,
         )) = attackers.get_mut(event.attacker)
         else {
             continue;
@@ -251,11 +264,23 @@ pub fn attack_system(
             apply_damage(&mut health, amount);
             timer.0 = melee.cooldown;
 
+            if let Some(mut od) = attacker_od {
+                od.gain(OD_GAIN_PER_HIT);
+            }
+
             if health.is_dead() {
-                if let (Some(xp_reward), Some(mut level), Some(mut points)) =
-                    (xp_reward, attacker_level, attacker_points)
-                {
-                    grant_xp(&mut level, &mut points, xp_reward.0);
+                if let (
+                    Some(xp_reward),
+                    Some(mut level),
+                    Some(mut stat_points),
+                    Some(mut skill_points),
+                ) = (
+                    xp_reward,
+                    attacker_level,
+                    attacker_stat_points,
+                    attacker_skill_points,
+                ) {
+                    grant_xp(&mut level, &mut stat_points, &mut skill_points, xp_reward.0);
                 }
             }
 
@@ -482,6 +507,7 @@ mod tests {
                 ActiveEffects::default(),
                 Level::default(),
                 UnspentStatPoints::default(),
+                UnspentSkillPoints::default(),
             ))
             .id();
         world.spawn((
@@ -524,6 +550,7 @@ mod tests {
                 ActiveEffects::default(),
                 Level::default(),
                 UnspentStatPoints::default(),
+                UnspentSkillPoints::default(),
             ))
             .id();
         world.spawn((

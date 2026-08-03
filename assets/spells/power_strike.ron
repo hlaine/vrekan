@@ -1,0 +1,10 @@
+(
+    od_cost: 20.0,
+    cooldown: 2.0,
+    kind: PowerStrike(
+        damage: 40.0,
+        damage_type: "primal",
+        range: 70.0,
+        effects: [],
+    ),
+)

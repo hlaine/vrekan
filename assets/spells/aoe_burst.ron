@@ -1,0 +1,10 @@
+(
+    od_cost: 35.0,
+    cooldown: 4.0,
+    kind: AoeBurst(
+        damage: 22.0,
+        damage_type: "primal",
+        radius: 90.0,
+        effects: [],
+    ),
+)

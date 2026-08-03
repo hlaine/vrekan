@@ -1,0 +1,15 @@
+(
+    od_cost: 25.0,
+    cooldown: 8.0,
+    kind: SelfBuff(
+        effect: (
+            id: "berserk",
+            kind: StatModifier(stat: CritChance),
+            duration: 5.0,
+            magnitude: 0.25,
+            stack_mode: RefreshDuration,
+            applies_to: Attacker,
+            chance: 1.0,
+        ),
+    ),
+)

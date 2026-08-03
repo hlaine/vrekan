@@ -1,7 +1,12 @@
 pub mod enemy;
+pub mod skill;
 
 pub use enemy::{
     load_all_enemy_templates, load_enemy_template, parse_enemy_template, spawn_enemy, EnemyTemplate,
+};
+pub use skill::{
+    load_all_skill_templates, load_skill_template, parse_skill_template, SkillKindTemplate,
+    SkillTemplate,
 };
 
 use std::fmt;
