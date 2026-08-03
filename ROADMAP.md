@@ -148,13 +148,41 @@ Claude Code tasks as you start it, not all upfront.
     dev visualization, not real art. See `MECHANICS.md`'s Combat section.
 
 ## M5 — Progression: leveling & stats
-- [ ] XP, character level, manual stat point allocation on level up — see
-  `MECHANICS.md` for the formula shape
+- [x] XP, character level, manual stat point allocation on level up — see
+  `MECHANICS.md` for the formula shape. `game_core::progression`:
+  `Level { level, xp }` + `xp_required(level)` (quadratic, uncapped),
+  `UnspentStatPoints` granted per level via `grant_xp` (handles multiple
+  level-ups in one XP grant), `Stats` (bonus_max_health/move_speed/
+  crit_chance/crit_multiplier — reuses existing mechanical stats rather
+  than inventing new attributes with no hookup yet). `XpReward` on enemies
+  (new content field), granted to the killing blow's attacker only in
+  `attack_system` — not shared across the party, a starting rule per
+  MECHANICS.md's "tune by feel" framing. No stat-*spending* UI yet
+  (MECHANICS.md itself defers that to M8) — points accumulate unspent,
+  `Stats`' bonuses have no gameplay effect until something can produce a
+  nonzero value.
 - [ ] XP penalty on individual death; full-party-wipe resets in-level
-  progress to zero (level itself never drops) — see `MECHANICS.md`
+  progress to zero (level itself never drops) — see `MECHANICS.md`. Not
+  yet built — follow-up task.
 - [ ] Resurrection-point checkpointing (auto-updates at dungeon entry /
-  objectives); full-wipe auto-respawn there
-- [ ] Server-authoritative, persisted per character (save format TBD)
+  objectives); full-wipe auto-respawn there. Not yet built — also has a
+  forward-dependency on M9's dungeon/objective triggers, which don't
+  exist yet.
+- [x] Server-authoritative, persisted per character. Save format: RON
+  files under `saves/<game_id>/` (`server::persistence` — `GameSave`,
+  `CharacterSave`), reusing the same `Level`/`Stats`/`UnspentStatPoints`
+  types the ECS already uses rather than a separate mirror format. Identity
+  model (confirmed with the user before implementing, resolving
+  `DESIGN.md`'s open question): one server process is one game; a
+  client-generated persistent character ID + a game password and a
+  character password (both checked server-side, neither remembered
+  client-side) carried in netcode's connection-time `user_data` field
+  (`protocol::ConnectAuth`) rather than a new gameplay message; a character
+  is scoped to one game, not portable across different games; no
+  account/login system or lobby UI (real menu is still M8 — see
+  `DECISIONS.md`). Duplicate simultaneous connections for the same
+  character are rejected; disconnecting a character saves its current
+  progression and reconnecting with the right password restores it.
 
 ## M6 — Skills
 - [ ] Skill acquisition and upgrade, data-driven like enemies/items

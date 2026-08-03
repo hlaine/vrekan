@@ -704,3 +704,94 @@ and `attack_system_still_hits_an_enemy_past_a_nearer_teammate` to
 `game_core::combat`'s tests — the latter specifically proves the fix
 skips past an ineligible nearer teammate to the next valid target rather
 than failing closed on the whole search.
+
+---
+
+## Character/game identity model, and how auth rides the existing connection handshake (M5)
+
+**Context:** M5's persistence bullet, and `DESIGN.md`'s open "save
+architecture... account/character identity model" question, needed an
+actual answer before any save code could be written — there was no
+login/account system at all (a client got a random ephemeral ID per
+connection). Confirmed with the user first, since this is exactly the kind
+of foundational, hard-to-reverse decision later milestones (M6/M7) will
+build on:
+
+- **One server process is one game.** No multi-tenant rewrite; a "game ID"
+  is a server-side save-directory namespace (`saves/<game_id>/`, from a CLI
+  arg, default `"default"`), never typed by a player — direct IP:port
+  connection already tells a client "which game" it's joining, since
+  there's no lobby/matchmaking service to make that ambiguous. A real
+  shareable-discovery-ID system would need an actual lobby layer, out of
+  scope here.
+- **`ServerAuthentication::Unsecure` stays, deliberately, for a LAN-style
+  host-and-share model** — not a public service. Verified in the actual
+  `renetcode`/`renet` source before accepting this: `Secure { private_key }`
+  already exists alongside `Unsecure` in the same crate, using a signed
+  `ConnectToken` instead of the plain handshake, so upgrading later is a
+  contained change, not a rewrite, if the hosting model ever changes.
+- **A character is scoped to one game**, persisting across reconnects to
+  *that* game, not a roster portable across different games — matches
+  `DESIGN.md`'s existing "only the player's character persists across
+  sessions" framing more closely than a portable-roster model would.
+- **Menu UI is still M8's job.** The client prompts for both passwords via
+  a blocking terminal `stdin` read at connect time (`client::prompt`) —
+  the closest non-UI stand-in for "enter it every time," not a permanent
+  design.
+
+**Decision — auth rides netcode's existing connection handshake, not a new
+gameplay message.** `protocol::ConnectAuth { game_password, character_id,
+character_password }` is RON-encoded (reusing `serde`/`ron`, not a
+hand-rolled byte layout — this is a small, rarely-(dis)assembled struct,
+not a hot-path wire message) into netcode's already-existing 256-byte
+connection-time `user_data` field (`NETCODE_USER_DATA_BYTES`, verified in
+`renetcode` source), which the client already had wired to `None`. The
+server reads it back via `NetcodeServerTransport::user_data(client_id)`
+(verified this method exists) inside the existing `on_client_connected`
+observer, before inserting any gameplay component — a rejection just calls
+`RenetServer::disconnect(client_id)` (verified exists) and returns early;
+`bevy_replicon_renet` despawns the `ConnectedClient`-only entity itself
+once the disconnect is processed (confirmed by reading its actual
+`ClientDisconnected` handler), so there's nothing to clean up on a
+rejected connection.
+
+**Decision — the disconnect-time save hooks `On<Remove, ConnectedClient>`,
+not the same `RenetServerEvent` bevy_replicon_renet itself reacts to.**
+`bevy_replicon_renet`'s own disconnect handling and this save logic both
+need to react to a client disconnecting, but they need different
+*ordering* guarantees: `bevy_replicon_renet` despawns the entity;
+`server::on_character_disconnected` needs to read that same entity's
+`CharacterId`/`Level`/`Stats` *before* it's gone. Reacting to the same
+`RenetServerEvent(ServerEvent::ClientDisconnected)` trigger `bevy_replicon_renet`
+itself uses would mean depending on two independent observers for the same
+custom event firing in a specific relative order — not a guarantee Bevy
+actually makes. `On<Remove, ConnectedClient>` sidesteps the race entirely:
+Bevy's own component-removal hooks are documented to run *before* the
+component (and the rest of the entity, mid-despawn) is actually gone, so
+reading sibling components from within that hook is always safe,
+regardless of how the despawn was triggered or which plugin triggered it.
+
+**Found via `cargo test`, not live play — RON's `u128` support needs a
+non-default feature flag.** `ConnectAuth::character_id` is a `u128`;
+`ron::to_string` failed at runtime with "u128 is not supported" despite
+`ron`'s serializer having `serialize_u128` in its source. Root cause:
+that method (and `serialize_i128`) is gated behind `#[cfg(feature =
+"integer128")]`, which is not in `ron`'s default feature set. Fixed by
+adding `features = ["integer128"]` to the workspace `ron` dependency — a
+dependency-config change (flagged per `CLAUDE.md`, though it's activating
+an existing feature of an already-approved, exact-pinned dependency, not a
+version bump or a new crate, and the feature itself pulls in no additional
+dependencies).
+
+**Consequences:** Character saves live at
+`saves/<game_id>/characters/<character_id>.ron`, containing the character's
+password in plaintext alongside `Level`/`Stats`/`UnspentStatPoints` —
+acceptable given the confirmed "not real security, LAN-style hosting"
+scope, but worth revisiting together with the `Unsecure`→`Secure` upgrade
+if the hosting model ever changes. A corrupt *game* save panics at Startup
+(before anyone's connected, matching the existing "malformed content fails
+loudly" convention); a corrupt *character* save or a failed disconnect-time
+write only logs an error and rejects/skips that one character, never
+crashing the server for everyone else already connected — deliberately not
+the same panic-on-malformed-content treatment, since per-character I/O
+failure is a recoverable, isolated case, not a startup-time invariant.

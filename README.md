@@ -60,16 +60,15 @@ cargo build --workspace --release
 
 ## Running
 
-> **Current status:** the workspace is at the M3.5 milestone (see
-> `ROADMAP.md`) — movement is server-authoritative and replicated, the
-> shared camera follows the party centroid with a hard leash, and player
-> movement collides with map terrain (server-authoritative, via avian2d).
-> Combat (melee attack), enemies, and AI are still simulated locally per
-> client, not networked yet — that lands in M4.
+> **Current status:** M4 (networked combat, damage types, downed/revive,
+> enemy collision, status effects) is complete; M5 (leveling/persistence)
+> is in progress — see `ROADMAP.md`.
 
 ```bash
-# Start a server (listens on UDP port 5000)
-cargo run -p server
+# Start a server (listens on UDP port 5000). The optional argument names
+# which save directory this server instance uses (saves/<name>/) —
+# defaults to "default" if omitted. One server process is one game.
+cargo run -p server -- my_game
 
 # In one or two other terminals, start a client
 cargo run -p client
@@ -78,8 +77,20 @@ cargo run -p client
 Run both from the repo root — the client loads enemy templates from
 `assets/enemies/` relative to the current directory. Controls: **WASD** to
 move (sent to the server, which simulates and replicates position back),
-**Space** to melee-attack the nearest enemy in range (still local-only for
-now), **F** (hold) to revive a downed ally standing nearby.
+**Space** to melee-attack the nearest enemy in range, **F** (hold) to
+revive a downed ally standing nearby.
+
+**Connecting:** each client generates a persistent character ID on first
+run (saved to `character_id.txt` next to where you ran it) and prompts in
+the terminal for a game password and a character password before
+connecting. The game password is checked against whatever the *first*
+client to ever connect to that `saves/<name>/` directory supplied (i.e. the
+host effectively sets it); the character password is checked against that
+character's own save the first time it's used and must match on every
+later reconnect. Neither is remembered client-side — expect the prompt
+every launch. There's no real account system or menu UI yet (planned for
+M8) — this is a deliberately minimal stand-in; see `DECISIONS.md` for the
+identity model this is based on.
 
 For local co-op testing on one machine, run one server and up to two client
 instances (`ROADMAP`/`DESIGN` party cap for v1) — each client connects to
