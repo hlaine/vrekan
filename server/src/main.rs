@@ -18,8 +18,8 @@ use bevy_replicon_renet::{
 };
 use content::{load_all_enemy_templates, spawn_enemy};
 use game_core::combat::{
-    attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, Health,
-    MeleeAttack,
+    attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, CombatStats,
+    DamageType, Health, MeleeAttack,
 };
 use game_core::enemy::ai_system;
 use game_core::movement::{leash_system, movement_system};
@@ -32,6 +32,12 @@ const PLAYER_MAX_HEALTH: f32 = 100.0;
 const PLAYER_ATTACK_RANGE: f32 = 60.0;
 const PLAYER_ATTACK_DAMAGE: f32 = 15.0;
 const PLAYER_ATTACK_COOLDOWN: f32 = 0.4;
+// A normal weapon strike — not yet one of the "christian" holy/radiant
+// types introduced by later enemy tiers (see DESIGN.md's Damage & faction
+// system and Enemy tiering sections).
+const PLAYER_ATTACK_DAMAGE_TYPE: &str = "primal";
+const PLAYER_CRIT_CHANCE: f32 = 0.1;
+const PLAYER_CRIT_MULTIPLIER: f32 = 1.5;
 const MAX_CLIENTS: usize = 2;
 const TICK_RATE: f64 = 60.0;
 
@@ -143,6 +149,11 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
             range: PLAYER_ATTACK_RANGE,
             damage: PLAYER_ATTACK_DAMAGE,
             cooldown: PLAYER_ATTACK_COOLDOWN,
+            damage_type: DamageType(PLAYER_ATTACK_DAMAGE_TYPE.to_string()),
+        },
+        CombatStats {
+            crit_chance: PLAYER_CRIT_CHANCE,
+            crit_multiplier: PLAYER_CRIT_MULTIPLIER,
         },
         AttackTimer(0.0),
         Replicated,

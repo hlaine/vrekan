@@ -60,6 +60,7 @@ pub fn ai_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::DamageType;
     use bevy_ecs::system::RunSystemOnce;
 
     fn spawn_enemy(world: &mut World, position: Position, aggro_range: f32) -> Entity {
@@ -73,6 +74,7 @@ mod tests {
                     range: 1.0,
                     damage: 5.0,
                     cooldown: 1.0,
+                    damage_type: DamageType("primal".to_string()),
                 },
                 Aggro { range: aggro_range },
             ))

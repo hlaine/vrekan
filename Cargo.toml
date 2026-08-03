@@ -34,3 +34,7 @@ avian2d = { version = "=0.7.0", default-features = false }
 # geometry without depending on bevy_ecs_tiled (which hard-depends on
 # bevy_render regardless of features — see CLAUDE.md).
 tiled = "=0.16.0"
+# game_core only: crit rolls (and later loot table rolls). Combat-resolution
+# functions take a generic `rng: &mut impl Rng` so tests can inject a seeded
+# RNG for deterministic assertions.
+rand = "=0.10.2"

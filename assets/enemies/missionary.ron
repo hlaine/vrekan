@@ -5,6 +5,13 @@
     melee_range: 45.0,
     melee_damage: 10.0,
     melee_cooldown: 1.1,
+    melee_damage_type: "primal",
+    crit_chance: 0.05,
+    crit_multiplier: 1.5,
+    // Slightly hardier convert than the farmer — a modest resistance to
+    // mundane physical strikes, not yet the "christian" holy/radiant types
+    // introduced by later tiers (see DESIGN.md's Enemy tiering).
+    resistances: {"primal": 0.1},
     color: (0.85, 0.8, 0.6),
     size: 30.0,
 )

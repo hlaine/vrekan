@@ -25,6 +25,15 @@ pub struct MoveInput {
 /// server resolves the actual attack (range, cooldown, target, damage)
 /// against its own authoritative state, never trusting client-supplied
 /// combat outcomes.
+///
+/// Uses `Channel::Unreliable`, not a reliable channel, despite being a
+/// discrete one-shot action rather than continuous state — see
+/// `DECISIONS.md` for why: `Channel::Unordered` was tried first and
+/// reproducibly stopped delivering messages after the first ~8 in live
+/// testing (confirmed via client/server logs — the client kept sending,
+/// the server just stopped receiving), while `Unreliable` delivered every
+/// message across repeated tests. Treat this as an occasionally-dropped
+/// input, same as `MoveInput`, not a guaranteed delivery.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttackInput;
 
@@ -41,6 +50,6 @@ impl Plugin for NetworkPlugin {
             .replicate::<Enemy>()
             .replicate::<EnemyKind>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
-            .add_client_message::<AttackInput>(Channel::Unordered);
+            .add_client_message::<AttackInput>(Channel::Unreliable);
     }
 }

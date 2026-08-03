@@ -5,6 +5,9 @@
     melee_range: 40.0,
     melee_damage: 8.0,
     melee_cooldown: 1.0,
+    melee_damage_type: "primal",
+    crit_chance: 0.05,
+    crit_multiplier: 1.5,
     color: (0.8, 0.15, 0.15),
     size: 28.0,
 )
