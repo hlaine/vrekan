@@ -50,8 +50,18 @@ Claude Code tasks as you start it, not all upfront.
   the origin, so this isn't a replacement of prior follow-camera behavior
 
 ## M4 — Combat & damage type system, networked
-- [ ] `DamageType` + resistance system from `game_core`, server-authoritative
-  — see `MECHANICS.md` for the damage/crit formula shape
+- [x] `DamageType` + resistance system from `game_core`, server-authoritative
+  — see `MECHANICS.md` for the damage/crit formula shape. `DamageType` is a
+  data-keyed string (not a fixed enum), `Resistances`/`CombatStats` are new
+  components, `resolve_damage` takes a generic `rng: &mut impl Rng` for
+  deterministic tests (new `rand` dependency in `game_core`, flagged and
+  confirmed). Enemy templates gained `melee_damage_type`/`crit_chance`/
+  `crit_multiplier`/`resistances` fields. Confirmed live: a player killed an
+  enemy with a resistance value in a real playtest, and (accidentally, while
+  debugging) confirmed the reverse direction too — see `DECISIONS.md` for
+  two real bugs this surfaced: `AttackInput`'s reliable channel silently
+  stopped delivering after ~8 messages, and player death currently
+  disconnects the client (no downed state yet, tracked below).
 - [x] Combat (melee attack from M1) works correctly across client/server —
   enemies now spawn/simulate server-side (`content::spawn_enemy`, replicated
   via `Enemy`/`EnemyKind`/`Health`/`Position`) and attacks are a networked
@@ -63,7 +73,11 @@ Claude Code tasks as you start it, not all upfront.
 - [ ] Generic status-effect system (stun, bleed, buffs — stackable,
   duration-based, attachable to any attack via data)
 - [ ] Player death → "downed" state (not respawn) — see `MECHANICS.md` for
-  the downed/revive/wipe rules
+  the downed/revive/wipe rules. Confirmed as a real, current gap: today
+  `death_system` despawns any zero-health entity indiscriminately, so a
+  player reaching 0 HP is despawned like an enemy — which tears down that
+  client's connection outright rather than downing them. This is expected
+  to be fixed by this milestone item, not a new regression.
 - [ ] Ally-revive: teammate walks to a downed player and presses an action
   button to revive them
 

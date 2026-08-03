@@ -287,3 +287,76 @@ continuous state that self-corrects next frame (→ `Unreliable`), or a
 one-shot action where a drop is a visible bug (→ `Unordered`, or `Ordered`
 only if relative sequencing between messages of that type actually
 matters)?
+
+---
+
+## Supersedes the above: `AttackInput`'s reliable channel doesn't reliably deliver (M4)
+
+**Context:** The previous entry's reasoning was sound in theory but wrong in
+practice. Live playtesting after wiring up `DamageType`/`Resistances`
+surfaced a concrete, reproducible bug: with `AttackInput` on
+`Channel::Unordered` (reliable), the client kept sending the message every
+time the attack key was pressed (confirmed via client-side logging — it
+logged "sending" on every press, no exceptions), but the server stopped
+receiving them entirely after the first ~8 messages of a session — not
+delayed, not occasional, *permanently* silent for the rest of that
+connection's lifetime, confirmed by watching both sides' logs over several
+minutes and dozens of further presses.
+
+**Decision:** Switched `AttackInput` to `Channel::Unreliable` (matching
+`MoveInput`). Verified the fix directly: 20/20 presses delivered
+client-to-server in a controlled back-to-back test on `Unreliable`, versus
+the reliable channel's silent cutoff. Root cause not fully isolated (a
+plausible but unconfirmed theory: `AttackInput` is a zero-field unit struct,
+so every message serializes to identical bytes — if this `bevy_replicon`/
+`renet` version's reliable-channel path does anything content-addressed
+rather than purely sequence-number-based for dedup/ack tracking, identical
+payloads could be the trigger), but not worth the time to root-cause further
+given a working alternative existed. The `protocol` crate's `AttackInput`
+doc comment carries this same explanation.
+
+**Consequences:** Don't trust `Channel::Unordered`/`Channel::Ordered`
+(reliable channels) as actually reliable in this dependency stack
+(`bevy_replicon` 0.41.1 + `bevy_replicon_renet` 0.17.0 + `renet` 2.0.0)
+without live-testing sustained delivery first — a handful of manual presses
+during development is not enough to catch this, since the first several
+messages of any session go through fine. If a future feature genuinely
+needs guaranteed delivery (not just "drops are tolerable"), that reliable
+channel claim needs verifying with a real burst test before depending on it,
+and may need a version bump or a different transport investigated as its
+own deliberate task.
+
+---
+
+## Player death currently disconnects the client (found via testing, not new) (M4)
+
+**Context:** While live-testing the `DamageType`/`Resistances` work,
+repeated manual combat attempts kept producing confusing, seemingly-broken
+results — inputs appeared to stop registering entirely partway through
+testing sessions. Root cause: `game_core::combat::death_system` despawns
+*any* entity at zero health, with no special case for players. A player's
+entity is the same entity bevy_replicon associates with that client's
+connection (see `on_client_connected`'s doc comment in `server/src/main.rs`)
+— despawning it while the client is still connected tears down the
+connection itself (confirmed in logs: `renetcode::client: Failed to update
+client: disconnected: connection terminated by server`), rather than
+leaving the player in any recoverable state.
+
+**Decision:** Not fixing this now — `ROADMAP.md`'s M4 already has "Player
+death → downed state (not respawn)" as its own explicit, not-yet-done item,
+and this *is* that gap, not a new regression introduced by the
+`DamageType`/`Resistances` work. Recording it here because it was
+non-obvious enough to burn significant debugging time (the symptom looks
+identical to "the client stopped sending input" or "the UI automation lost
+focus," not "the player character died"), and because enemies now
+auto-attack via `ai_system` the moment they're in range, so a player can die
+this way well before anyone builds a HUD to show it happening.
+
+**Consequences:** Until the downed-state milestone lands, treat any
+"combat/input mysteriously stopped working" symptom during manual testing
+as a first suspect for this — check the client log for a
+`renetcode`/`bevy_replicon` disconnect message before assuming the bug is
+elsewhere. Also worth remembering when building the downed-state system:
+`death_system` will need to stop treating players and enemies identically,
+likely via a marker/branch that routes a zero-health `Player` entity to a
+downed-state transition instead of `commands.entity(entity).despawn()`.
