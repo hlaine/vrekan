@@ -208,3 +208,82 @@ that a `Kinematic` body ignores collision. If a future change reintroduces
 a `Kinematic` body anywhere collision with it is expected to matter, don't
 trust that it compiles cleanly as evidence it works — playtest the specific
 collision.
+
+---
+
+## Moving enemies server-side forces combat server-side too (M4)
+
+**Context:** Enemies were entirely client-local through M3.5 (spawned and
+simulated independently by each client, per M1/M2). The M4 goal was just
+"enemies exist on the server, replicated" — combat networking looked like a
+separable, later step.
+
+**Decision:** It isn't separable. The moment `Health` becomes a replicated
+component, the client's own local `attack_system` call (resolving the
+player's attack against its local copy of an enemy's `Health`) starts
+fighting the replication system — any damage the client applies locally
+gets overwritten by the server's next update, since the client is no longer
+the source of truth for that component. So moving enemies server-side and
+moving combat resolution server-side had to land together: the client sends
+`AttackInput` (a new client message, no payload — the server resolves
+range/cooldown/target/damage from its own authoritative state, same
+principle as `MoveInput` never trusting a client-supplied speed), and
+`game_core::combat::attack_system`/`death_system`/`tick_attack_timers` now
+only run in the server's schedule.
+
+**Consequences:** Any future component that moves from "client-simulated"
+to "server-authoritative + replicated" should be checked for this same
+trap — if the client mutates that component's data anywhere (not just reads
+it), replicating it will silently make those client-side mutations
+pointless/flickery rather than erroring. Treat "replicate X" and "stop
+letting the client mutate X" as one atomic change, not two.
+
+---
+
+## Replicating a content-template *key*, not template data (M4)
+
+**Context:** Enemies are now spawned server-side from `content::EnemyTemplate`
+RON files (color, size, stats). The client needs to know which appearance
+(color/size) to render for a given replicated enemy entity, but the full
+template isn't (and shouldn't be) sent over the wire — `content` stays a
+local-filesystem-loaded crate on both sides, not a network-transmitted one.
+
+**Decision:** Added `game_core::EnemyKind(pub String)` — just the template's
+key (e.g. `"converted_farmer"`, the `.ron` filename stem) — as a replicated
+component. The client keeps loading all `.ron` files locally at startup
+(same as before M4, just for appearance lookup now instead of simulation)
+into an `EnemyTemplates` resource, and a reactive system
+(`init_replicated_enemies`, keyed off `Added<EnemyKind>`) looks up the
+matching template by that key to pick `Sprite` color/size.
+
+**Consequences:** This is the general pattern for any future content-backed
+entity that needs to be spawned server-side and rendered client-side (items
+dropped in the world, spell-effect visuals, etc. — see M6/M7): replicate the
+content key, not the content data, and let each side resolve the rest from
+its own already-loaded copy of the same `.ron` files. Keeps `protocol`'s
+wire format small and stable even as template schemas grow richer fields
+over time (a new `EnemyTemplate` field never needs a protocol change).
+
+---
+
+## `AttackInput` is reliable-unordered, not unreliable like `MoveInput` (M4)
+
+**Context:** `protocol` needed a new client→server message for attack
+input. `MoveInput` (continuous per-frame state) uses `Channel::Unreliable` —
+dropping one frame's movement input doesn't matter, the next frame's arrives
+almost immediately and corrects it.
+
+**Decision:** `AttackInput` uses `Channel::Unordered` (bevy_replicon's
+reliable-but-unordered channel) instead. It's a discrete, one-shot action
+tied to a keypress, not continuous state — losing one has no "next frame"
+to self-correct with, so it would read as an attack that silently didn't
+register. Ordering relative to other `AttackInput` messages doesn't matter
+(each just resolves independently against whatever's in range at the time),
+so `Ordered` would be unnecessary overhead.
+
+**Consequences:** When adding future discrete player actions (dodge, skill
+activation, item use, etc. — M6/M7), default to this same reasoning: is it
+continuous state that self-corrects next frame (→ `Unreliable`), or a
+one-shot action where a drop is a visible bug (→ `Unordered`, or `Ordered`
+only if relative sequencing between messages of that type actually
+matters)?

@@ -52,11 +52,18 @@ Claude Code tasks as you start it, not all upfront.
 ## M4 — Combat & damage type system, networked
 - [ ] `DamageType` + resistance system from `game_core`, server-authoritative
   — see `MECHANICS.md` for the damage/crit formula shape
-- [ ] Combat (melee attack from M1) works correctly across client/server
+- [x] Combat (melee attack from M1) works correctly across client/server —
+  enemies now spawn/simulate server-side (`content::spawn_enemy`, replicated
+  via `Enemy`/`EnemyKind`/`Health`/`Position`) and attacks are a networked
+  `AttackInput` client message resolved authoritatively by
+  `game_core::combat::attack_system`; the client only renders replicated
+  state. Enemy death (despawn on zero health) confirmed working end-to-end
+  in a live two-client playtest — see `DECISIONS.md` if this needs
+  revisiting.
 - [ ] Generic status-effect system (stun, bleed, buffs — stackable,
   duration-based, attachable to any attack via data)
-- [ ] Enemy death; player death → "downed" state (not respawn) — see
-  `MECHANICS.md` for the downed/revive/wipe rules
+- [ ] Player death → "downed" state (not respawn) — see `MECHANICS.md` for
+  the downed/revive/wipe rules
 - [ ] Ally-revive: teammate walks to a downed player and presses an action
   button to revive them
 
