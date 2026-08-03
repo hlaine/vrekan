@@ -28,16 +28,25 @@ Claude Code tasks as you start it, not all upfront.
 - [x] Two clients connect to one local server, see each other move
 
 ## M3.5 — Shared camera, leash, and map collision
-- [ ] Camera driven by party centroid (both clients), zoom scales with party
+- [x] Camera driven by party centroid (both clients), zoom scales with party
   spread — see `DESIGN.md`'s Camera & movement section
-- [ ] Hard leash: players can't exceed the camera's max spread, plus a
+- [x] Hard leash: players can't exceed the camera's max spread, plus a
   lightweight visual indicator at the limit (not the real HUD, that's M8)
-- [ ] Map collision: `bevy_ecs_tiled` (parses Tiled maps, auto-spawns physics
-  colliders from object layers) + `avian2d` as the physics backend — freeform
-  polygon colliders authored in Tiled, a first test map with a valley-style
-  narrow pass between blocking mountain shapes. Both are new external
-  dependencies per `CLAUDE.md`'s review rule — flagged and confirmed.
-- [ ] First real camera system — M1 only ever spawned a static `Camera2d` at
+- [x] Map collision: freeform polygon colliders authored in Tiled, a first
+  test map (`assets/maps/valley.tmx`) with a valley-style narrow pass
+  between blocking mountain shapes. `avian2d` is the physics backend
+  (server-only, `RigidBody::Dynamic` players against `RigidBody::Static`
+  colliders — `Kinematic` bodies aren't affected by collisions in avian2d,
+  so this isn't the naive choice it looks like). Client renders the map via
+  `bevy_ecs_tiled`; the server parses the same file with the plain `tiled`
+  crate instead, since `bevy_ecs_tiled` hard-depends on `bevy_render`
+  regardless of features (confirmed empirically — not just a Cargo-feature
+  toggle away) — see `CLAUDE.md`'s feature-unification note and
+  `server/src/main.rs`'s `spawn_map_colliders` doc comment for the anchor
+  convention keeping the two in sync. Both `tiled` and `avian2d` are new
+  external dependencies per `CLAUDE.md`'s review rule — flagged and
+  confirmed.
+- [x] First real camera system — M1 only ever spawned a static `Camera2d` at
   the origin, so this isn't a replacement of prior follow-camera behavior
 
 ## M4 — Combat & damage type system, networked

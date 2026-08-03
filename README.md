@@ -60,10 +60,12 @@ cargo build --workspace --release
 
 ## Running
 
-> **Current status:** the workspace is at the M3 milestone (see
-> `ROADMAP.md`) — movement is now server-authoritative and replicated. Combat
-> (melee attack), enemies, and AI are still simulated locally per client, not
-> networked yet — that lands in M4.
+> **Current status:** the workspace is at the M3.5 milestone (see
+> `ROADMAP.md`) — movement is server-authoritative and replicated, the
+> shared camera follows the party centroid with a hard leash, and player
+> movement collides with map terrain (server-authoritative, via avian2d).
+> Combat (melee attack), enemies, and AI are still simulated locally per
+> client, not networked yet — that lands in M4.
 
 ```bash
 # Start a server (listens on UDP port 5000)
@@ -89,6 +91,15 @@ clients will need the `server` crate's connection address made configurable
 Enemies are data-driven: adding a new enemy type is just a new `.ron` file in
 `assets/enemies/` (see the existing files for the schema) — no code changes
 needed.
+
+Map terrain/collision is authored in [Tiled](https://www.mapeditor.org/) —
+`assets/maps/valley.tmx` is the current test map, a valley with a narrow
+pass between two mountain shapes. Collision polygons live in the map's
+"collision" object layer; both `client` (rendering, via `bevy_ecs_tiled`)
+and `server` (physics, via the plain `tiled` crate + avian2d) load the same
+file, so the visual and collision geometry can't drift apart — see
+`server/src/main.rs`'s `spawn_map_colliders` doc comment for the coordinate
+convention this depends on if you add or edit maps.
 
 ## Testing
 

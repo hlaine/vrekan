@@ -130,6 +130,19 @@ Pin exact versions in `[workspace.dependencies]`. Do not bump Bevy or other core
 dependencies as a side effect of an unrelated task — flag it and treat upgrades as
 their own deliberate task, since Bevy minor versions routinely break APIs.
 
+**Cargo feature unification across workspace builds.** When a dependency is
+shared between `client` and `server` with different features enabled per
+crate (e.g. `bevy_ecs_tiled`'s render vs. headless/avian features), building
+via `cargo build --workspace` unifies the feature set across every workspace
+member being built — the server binary produced by a workspace-wide build
+will include the client's features too, not just its own. This is expected
+and harmless for CI/local dev (the Linux CI runner already installs the
+client's windowing/audio packages, so this doesn't newly break anything
+there). It matters for real deployment: **always build the server for
+deployment via `cargo build -p server --release`, never `--workspace`**, so
+the shipped binary keeps the minimal dependency footprint the feature split
+was meant to guarantee.
+
 ## Module organization
 
 Group by feature/domain within a crate (e.g. `combat.rs` holds related combat
