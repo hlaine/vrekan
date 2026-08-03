@@ -36,12 +36,17 @@ should be a per-effect data field, not a single global rule). This is the
 same content-first principle as enemy/item templates: adding a new effect
 should mean a new data entry, not new engine code for that specific effect.
 
-**Facing direction.** Every player has a facing direction derived from their
-last non-zero movement input (WASD), holding the last facing while
-stationary — server-authoritative and replicated, not client-inferred,
+**Facing direction.** Every player *and enemy* has a facing direction
+derived from their last non-zero movement (WASD for players, the AI's own
+chase movement for enemies), holding the last facing while stationary or
+attacking — server-authoritative and replicated, not client-inferred,
 consistent with movement itself being server-resolved (see `DESIGN.md`'s
 Camera & movement section). This is what "aimed" means in `DESIGN.md`'s
-Core loop: no independent mouse-look for v1.
+Core loop: no independent mouse-look for v1. Enemies use the exact same
+movement-derived mechanism as players, not target-tracking — an enemy
+stopped mid-attack keeps facing wherever it was last moving (typically
+still toward its target, since it just chased them there), rather than
+snapping to face its target directly.
 
 **Attack range/shape stays pure math, not physics colliders.** Melee (and
 later ranged) hit detection is a distance check — and, once directional
@@ -166,6 +171,8 @@ components, not a fork of the base enemy system.
 - Whether the crit-before-resistance ordering feels right in practice.
 - Stacking rules for status effects may need per-effect-type refinement once
   a few real effects exist and can be tested together.
-- Whether enemies should also get a facing direction and directional melee
-  arcs (matching players), or keep the current omnidirectional radius check
-  for AI-driven attacks indefinitely.
+- Whether directional melee arcs (cones, once built) should apply to
+  AI-driven enemy attacks too, or stay a player-only refinement over the
+  current omnidirectional radius check — enemies already have a facing
+  direction now (see Combat section above), so this is purely about
+  whether their own attacks should be gated by it.

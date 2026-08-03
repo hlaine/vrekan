@@ -101,17 +101,32 @@ Claude Code tasks as you start it, not all upfront.
   like `MoveInput` (continuous state, `Channel::Unreliable`). No revive
   progress bar yet — that's M8 HUD work; the only client feedback today is
   the downed tint clearing once revived.
-- [ ] Additions beyond this milestone's original scope, added after a design
+- [x] Additions beyond this milestone's original scope, added after a design
   discussion on movement/combat feel:
-  - Enemies are solid `avian2d` bodies — block players (and each other, and
-    downed players), can't be walked through. Mass scales with enemy size,
-    so bumping a big enemy barely moves it while a small one can be shoved
-    — normal dynamic-body physics, not a scripted immovable-object case. See
-    `DESIGN.md`'s Camera & movement section.
-  - Player facing direction, derived from movement input, server-
-    authoritative and replicated — groundwork for directional (cone) melee
-    attacks, not yet used to gate anything. See `MECHANICS.md`'s Combat
-    section.
+  - Enemies are solid `avian2d` bodies now (`RigidBody::Dynamic` +
+    `Collider::circle` sized from the existing content `size` field,
+    mirroring the player's own physics setup in `on_client_connected`) —
+    block players, can't be walked through. No explicit `Mass`/
+    `ColliderDensity`: avian2d auto-computes mass from collider area ×
+    density, so bigger enemies are proportionally heavier and resist being
+    shoved for free; current tier-1 enemies (28-30 unit `size`) are ~76-88%
+    of the player's mass, so expect mild pushback today, more resistance
+    from bigger/later tiers. Enemies also collide with each other and with
+    downed players (never removed their collider, so this needed no new
+    code) — all via avian2d's default collision layers (everything collides
+    with everything unless configured otherwise, verified in source before
+    relying on it). Enemies moved off `game_core::movement_system`'s plain
+    integrator onto `avian2d` entirely — see `server`'s
+    `sync_enemy_velocity_to_physics`; `movement_system` stays in
+    `game_core`, tested, just uncalled by this binary now. See `DESIGN.md`'s
+    Camera & movement section.
+  - Player *and enemy* facing direction (`game_core::Facing`), derived from
+    movement input, server-authoritative and replicated — resolves
+    `MECHANICS.md`'s open question in favor of giving enemies facing too.
+    Groundwork for directional (cone) melee attacks, not yet used to gate
+    anything. Visualized client-side with a `bevy_gizmos` arrow
+    (`facing_indicator_system`) for both players and enemies — placeholder
+    dev visualization, not real art. See `MECHANICS.md`'s Combat section.
 
 ## M5 — Progression: leveling & stats
 - [ ] XP, character level, manual stat point allocation on level up — see

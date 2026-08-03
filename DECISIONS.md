@@ -517,3 +517,71 @@ future system that queries for "the player" via `.single()` (there's
 nothing else doing this today, but worth checking before adding one) should
 be treated as suspect the moment the system is meant to work with a full
 co-op party, not just a lone developer testing solo.
+
+---
+
+## Enemy collision migrates enemies onto avian2d entirely; facing uses gizmos, not sprites (M4)
+
+**Context:** A design discussion on movement/combat feel (see `ROADMAP.md`'s
+M4 additions) settled on: enemies should be solid, normal dynamic-body
+physics (not a scripted "immovable object"), with mass scaled by size;
+enemies collide with each other too; downed players stay solid; and both
+players and enemies get a movement-derived facing direction, visualized
+with an arrow. Before implementing, three `avian2d`/`bevy_gizmos` API facts
+were verified against the actual 0.7.0/0.19.0 source rather than assumed,
+since getting any of them wrong would have meant reaching for unnecessary
+extra components:
+
+1. Mass is auto-computed from a `Collider`'s shape area × `ColliderDensity`
+   (default `1.0`), unless `NoAutoMass` is added. Sizing each enemy's
+   `Collider::circle` from the same `template.size` field already used for
+   its sprite therefore gives bigger enemies proportionally more mass with
+   zero new content fields or explicit `Mass`/`ColliderDensity` components.
+2. `CollisionLayers::default()` is memberships=ALL, filters=ALL — dynamic
+   bodies collide with everything by default, so giving enemies the same
+   bare `RigidBody::Dynamic` + `Collider` setup players already have was
+   enough to get enemy-vs-player, enemy-vs-terrain, and enemy-vs-enemy
+   collision all at once, no `CollisionLayers` configuration needed.
+3. `bevy_gizmos` ships as part of `DefaultPlugins` (already used by
+   `client`) and is immediate-mode: a system that calls `gizmos.arrow_2d`
+   every frame from current `Position`/`Facing` needs no spawned indicator
+   entity and has no lifecycle to manage — it can't go stale the way
+   ally-revive's sprite-tint overlay did, since there's no persisted state
+   to leave behind.
+
+**Decision:** Enemies fully migrated onto `avian2d` (`RigidBody::Dynamic`,
+`Collider::circle(template.size / 2.0)`, `LockedAxes::ROTATION_LOCKED`,
+`Friction::ZERO`, mirroring `on_client_connected`'s player setup exactly),
+attached in `server::spawn_enemies` rather than `content::spawn_enemy` —
+keeping `content` free of an `avian2d` dependency it would otherwise gain
+for every crate that depends on it (including `client`, which never spawns
+enemies itself) for zero benefit, the same feature-unification concern
+`CLAUDE.md` already flags for `bevy_ecs_tiled`. `ai_system` still decides a
+plain `game_core::Velocity` per enemy; a new `sync_enemy_velocity_to_physics`
+copies that into `avian2d`'s `LinearVelocity` each tick, the same role
+`apply_move_input` plays for players. `game_core::movement::movement_system`
+(the old plain integrator) is no longer called by `server` — enemies were
+its only user — but stays in `game_core`, still unit-tested, since it's
+valid engine-agnostic logic that just happens to be unused by this binary
+right now.
+
+`Facing` (`game_core::movement`) is a plain `{x, y}` normalized-direction
+component updated by whichever system already decides movement for that
+entity (`apply_move_input` for players from `MoveInput`, `ai_system` for
+enemies from its own chase-velocity decision) — not a new movement path.
+Visualized via one client system, `facing_indicator_system`, matching *any*
+entity with `(Position, Facing)` with a `gizmos.arrow_2d` call — no
+`Or<With<Player>, With<RemotePlayer>, With<Enemy>>` filter needed, since
+gizmos don't care what else is on the entity.
+
+**Consequences:** Enemy movement now has the same one-tick physics latency
+as players (a velocity decision this tick is only visible after the next
+physics step), which is consistent, not a new source of desync. Current
+tier-1 enemies (`converted_farmer` size 28, `missionary` size 30) come out
+slightly *lighter* than the player (collider radius 16) by this formula —
+mass ∝ radius² — so expect mild, not strong, pushback from today's weakest
+enemies; this is untuned and expected to improve as later, larger enemy
+tiers are added, not a bug to fix now. If a `Mass`/`ColliderDensity`
+override per template ever proves necessary (e.g. a big enemy that still
+feels too light), that's a `content::EnemyTemplate` schema addition to make
+then, not now.
