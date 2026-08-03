@@ -75,8 +75,27 @@ Claude Code tasks as you start it, not all upfront.
   clients connected until the fix described in `DECISIONS.md` — see that
   entry before treating "combat works across client/server" as fully
   verified for anything AI-driven.
-- [ ] Generic status-effect system (stun, bleed, buffs — stackable,
-  duration-based, attachable to any attack via data)
+- [x] Generic status-effect system — `game_core::status_effect`:
+  `EffectKind` (`DamageOverTime`/`Stun`/`StatModifier`) is a small fixed set
+  of engine-known behavior shapes, mirroring `DamageType`'s data-vs-engine
+  split; an effect's identity/numbers (`EffectDefinition`) is data, same
+  principle as enemy/item templates. Stacking (`StackMode`:
+  `RefreshDuration`/`AddMagnitude`/`Independent`) is a per-effect field, not
+  a global rule, per `MECHANICS.md`. `MeleeAttack` gained `effects:
+  Vec<EffectDefinition>`, attachable via content (`content::EffectTemplate`
+  RON schema) or server constants, applied to either side of a landed hit
+  via `EffectDefinition::applies_to`. Buffs never mutate the base
+  `CombatStats`/`MoveSpeed` component — `ActiveEffects::stat_bonus` is
+  computed fresh at the point of use, deliberately avoiding the stale-cache
+  bug class from ally-revive's original sprite-tint overlay.
+  `Stunned` is a replicated marker (mirrors `Downed`) kept in sync by
+  `tick_status_effects`, but — unlike `Downed` — a stunned entity stays a
+  valid attack target; it can't act, but isn't out of combat. Proven with
+  one real content instance per stacking mode: `missionary.ron`'s bleed
+  (`AddMagnitude`), `converted_farmer.ron`'s daze/stun (`RefreshDuration`),
+  and the player's own "fury" self-buff on landed hits (`Independent`, a
+  server constant since player combat stats already are). No enemy-side
+  stun visual yet (players only) — see `DECISIONS.md`.
 - [x] Player death → "downed" state (not respawn) — see `MECHANICS.md` for
   the downed/revive/wipe rules. `death_system` now branches on a `Player`
   marker: a player at zero health gets a new `Downed` component instead of

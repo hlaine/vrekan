@@ -585,3 +585,122 @@ tiers are added, not a bug to fix now. If a `Mass`/`ColliderDensity`
 override per template ever proves necessary (e.g. a big enemy that still
 feels too light), that's a `content::EnemyTemplate` schema addition to make
 then, not now.
+
+---
+
+## Status effects: buffs read fresh (never cached), and a real Bevy query-aliasing bug found while building it (M4)
+
+**Context:** M4's last item, the generic status-effect system, needed to
+support all three of MECHANICS.md's named examples (bleed/DoT, stun/CC,
+"fury"/buff) through one data-driven mechanism, including a case
+`MECHANICS.md`'s own wording implied but the existing attack model didn't
+have a slot for: a buff like "fury" applies to the *attacker*, not the
+attack's target, unlike bleed/stun which afflict whoever got hit. Added
+`EffectDefinition::applies_to: EffectTarget` (`Target` | `Attacker`) to
+`attack_system` to route each effect to the right side of a landed hit.
+
+**Decision 1 — buffs are never applied by mutating `CombatStats` (or any
+base stat component).** `ActiveEffects::stat_bonus(stat)` sums active
+`StatModifier` magnitudes and is added to the base value fresh, at the
+point of use (`attack_system` builds an ephemeral "effective" `CombatStats`
+just for that call). Nothing ever writes a buffed value back into the
+entity's real `CombatStats`, so there's no "restore the original value when
+the buff expires" step to forget — this is deliberately the mirror image of
+ally-revive's original sprite-tint-overlay bug (see that entry above):
+compute fresh every time, don't cache a modified value and hope to
+invalidate it correctly later.
+
+**Decision 2 (found via `cargo test`, not live play) — `ActiveEffects`
+needed its own dedicated query, fetched via `get_many_mut`, not one query
+per side.** The natural first draft put `&mut ActiveEffects` in both
+`attack_system`'s attacker query and its target `healths` query. This
+panics at runtime (Bevy error B0001, "queries with conflicting mutable
+access to the same component"): an attacker and its target are always
+different entities (the nearest-target search excludes the attacker
+itself), but Bevy's query-conflict check is purely structural — it sees
+that *some* entity could in principle match both queries (any combatant
+has both `MeleeAttack` and `Health`) and refuses to compile/run the system
+regardless of the runtime guarantee. Fixed by pulling `ActiveEffects` into
+its own unfiltered `Query<&mut ActiveEffects>` and fetching both sides at
+once with `.get_many_mut([attacker, target])`, which is exactly the API
+Bevy provides for "I need mutable access to two entities from one query
+and I can prove they differ."
+
+**Consequences:** Any future system needing mutable access to the *same*
+component type on two different logical roles (attacker/target,
+mover/pusher, etc.) should reach for `get_many_mut` on one shared query
+from the start, not two separately-typed queries — the conflict only
+surfaces at compile/run time, not from reading the code, so this is easy to
+reintroduce by accident. Enemies don't get a `Stunned` sprite tint yet
+(players only, via `player_appearance_system`) — an enemy's base color
+varies per content template rather than being a fixed constant, so
+reverting it cleanly after a stun ends needs storing each enemy's base
+color somewhere first; deferred as a real gap, not an oversight, since the
+mechanical effect (a stunned enemy visibly stops moving/attacking) is
+already observable without it.
+
+---
+
+## Effects gained a per-hit `chance`, found necessary via live testing (M4)
+
+**Context:** Playtesting `converted_farmer`'s daze (a guaranteed,
+`RefreshDuration` `Stun`, 1.5s duration) surfaced a real permastun: the
+farmer's own attack cooldown (1.0s) is shorter than the stun's duration,
+so every landed hit refreshed the clock before it could ever expire —
+the player was locked out of acting indefinitely. This is a general hazard
+of the status-effect system as originally built, not specific to this one
+enemy: any guaranteed CC effect whose duration outlasts its inflictor's
+attack cooldown can do this.
+
+**Decision:** Added `EffectDefinition::chance: f32` (fraction of landed
+hits that actually apply the effect; `1.0` = the old always-apply
+behavior), rolled independently per effect in `attack_system` using the
+same `rng`/`random_bool` pattern `resolve_damage` already uses for crits.
+`content::EffectTemplate` mirrors it with `#[serde(default = "full_chance")]`
+so existing/future content that wants "always applies" doesn't need to
+name the field. Fixed `converted_farmer.ron` concretely: daze's duration
+dropped to 0.6s (comfortably under the farmer's 1.0s cooldown) and
+`chance: 0.25` — even a lucky streak of procs can't permalock, since the
+stun always expires before the next possible hit lands.
+
+**Consequences:** `chance` is a general per-effect field, not special-cased
+to `Stun` — a `DamageOverTime` or `StatModifier` effect can use it too
+(e.g. an "on-hit poison chance"), consistent with the rest of the system
+being data, not hardcoded per-effect-kind logic. Any *future* guaranteed,
+refresh-duration CC effect should still be checked against its inflictor's
+own attack cooldown before shipping — `chance` makes permalock unlikely,
+not structurally impossible, if someone sets `chance: 1.0` again with a
+too-long duration. `bleed`/`fury` are unaffected (`chance: 1.0`, and
+neither is a CC effect that can lock the target out of acting either way).
+
+---
+
+## Found via testing: players could damage each other (M4)
+
+**Context:** `DESIGN.md`'s Multiplayer scope already says "Co-op only. No
+PvP" — a settled rule, not a new decision. But `attack_system`'s
+nearest-target search only ever checked `With<Health>` + `Without<Downed>`,
+with no concept of faction, so a player standing near a teammate (which
+co-op play makes routine — see the leash mechanic) could end up as another
+player's "nearest target in range" and take damage, found via live
+testing.
+
+**Decision:** `AttackTargets` and `Attackers` both gained `Has<Player>` as
+query *data* (not a filter — whether a `Player` target is excluded depends
+on whether the attacker is *also* a `Player`, which a static query filter
+can't express). `attack_system`'s nearest-target search adds one line:
+skip any candidate where both attacker and target are players. Enemies
+remain attackable by players either way, and this doesn't touch
+enemy-vs-player targeting (`ai_system` only ever targets players, never
+other enemies, so enemy-vs-enemy friendly fire was never a live pathway to
+begin with).
+
+**Consequences:** If enemy-vs-enemy attacks are ever introduced (not
+planned, but nothing currently prevents it structurally), this same
+`Has<Player>` check only prevents *player*-vs-player damage — it would not
+by itself stop two enemies from hurting each other, which may or may not
+be desired at that point. Added `attack_system_prevents_player_on_player_damage`
+and `attack_system_still_hits_an_enemy_past_a_nearer_teammate` to
+`game_core::combat`'s tests — the latter specifically proves the fix
+skips past an ineligible nearer teammate to the next valid target rather
+than failing closed on the whole search.
