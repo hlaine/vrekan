@@ -23,8 +23,8 @@ use game_core::combat::{
 };
 use game_core::enemy::ai_system;
 use game_core::movement::{leash_system, movement_system};
-use game_core::{DeltaSeconds, MoveSpeed, Player, Position};
-use protocol::{AttackInput, MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
+use game_core::{revive_system, DeltaSeconds, Downed, MoveSpeed, Player, Position, Reviving};
+use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
 
 const PLAYER_SPEED: f32 = 200.0;
 const PLAYER_COLLIDER_RADIUS: f32 = 16.0;
@@ -78,6 +78,7 @@ fn main() {
                 update_delta_seconds,
                 apply_move_input,
                 apply_attack_input,
+                apply_revive_input,
                 sync_physics_position_to_game_core,
                 leash_system,
                 sync_game_core_position_to_physics,
@@ -86,10 +87,12 @@ fn main() {
                 tick_attack_timers,
                 attack_system,
                 death_system,
+                revive_system,
             )
                 .chain(),
         )
         .add_observer(on_client_connected)
+        .add_observer(on_player_downed)
         .run();
 }
 
@@ -166,6 +169,16 @@ fn on_client_connected(add: On<Add, ConnectedClient>, mut commands: Commands) {
     ));
 }
 
+/// A player who dies mid-move would otherwise keep sliding under whatever
+/// `LinearVelocity` they last had — `apply_move_input` stops issuing new
+/// velocity for a downed player (see below) but never zeroes out what's
+/// already there.
+fn on_player_downed(add: On<Add, Downed>, mut velocities: Query<&mut LinearVelocity>) {
+    if let Ok(mut velocity) = velocities.get_mut(add.entity) {
+        *velocity = LinearVelocity::ZERO;
+    }
+}
+
 /// Loads every enemy template and spawns one instance of each in the map's
 /// bottom open field. Enemies are simulated with the plain
 /// `game_core::movement` integrator (`Velocity`/`movement_system`), not
@@ -223,10 +236,17 @@ fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
     delta.0 = time.delta_secs();
 }
 
-fn apply_move_input(
-    mut inputs: MessageReader<FromClient<MoveInput>>,
-    mut players: Query<(&MoveSpeed, &mut LinearVelocity), With<Player>>,
-) {
+/// A downed player is out of combat entirely and ignores move input — see
+/// `game_core::combat::attack_system`'s doc comment for the same rule
+/// applied to attacking.
+type MovablePlayers<'w, 's> = Query<
+    'w,
+    's,
+    (&'static MoveSpeed, &'static mut LinearVelocity),
+    (With<Player>, Without<Downed>),
+>;
+
+fn apply_move_input(mut inputs: MessageReader<FromClient<MoveInput>>, mut players: MovablePlayers) {
     for input in inputs.read() {
         let Some(entity) = input.client_id.entity() else {
             continue;
@@ -252,6 +272,24 @@ fn apply_attack_input(
             continue;
         };
         attack_events.write(AttackRequested { attacker: entity });
+    }
+}
+
+/// Turns a client's `ReviveInput` into a `Reviving` marker on their own
+/// player entity, held for as long as the client keeps sending `held: true`
+/// — `revive_system` (in `game_core`) does the actual range/progress/
+/// completion resolution from there, same division of labor as
+/// `apply_attack_input`/`attack_system`.
+fn apply_revive_input(mut inputs: MessageReader<FromClient<ReviveInput>>, mut commands: Commands) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        if input.held {
+            commands.entity(entity).insert(Reviving);
+        } else {
+            commands.entity(entity).remove::<Reviving>();
+        }
     }
 }
 

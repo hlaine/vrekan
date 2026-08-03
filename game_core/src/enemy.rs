@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::combat::{AttackRequested, MeleeAttack};
 use crate::movement::{MoveSpeed, Position, Velocity};
-use crate::player::Player;
+use crate::player::{Downed, Player};
 
 #[derive(Component, Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Enemy;
@@ -33,18 +33,28 @@ type EnemyQueryData = (
     &'static Aggro,
 );
 
-/// Simple chase-and-attack pattern: idle outside `Aggro::range`, close the
-/// distance while outside melee range, and attack once in range.
+/// Simple chase-and-attack pattern: each enemy targets whichever non-downed
+/// player is nearest to it (independently per enemy, so different enemies
+/// can chase different players), idles outside `Aggro::range`, closes the
+/// distance while outside melee range, and attacks once in range. A downed
+/// player is out of combat entirely (see MECHANICS.md) and a party with no
+/// eligible player at all (zero connected, or the sole player downed) means
+/// every enemy just idles.
 pub fn ai_system(
-    player_query: Query<&Position, With<Player>>,
+    player_query: Query<&Position, (With<Player>, Without<Downed>)>,
     mut enemies: Query<EnemyQueryData, With<Enemy>>,
     mut attack_events: MessageWriter<AttackRequested>,
 ) {
-    let Ok(player_pos) = player_query.single() else {
-        return;
-    };
-
     for (entity, enemy_pos, mut velocity, speed, melee, aggro) in &mut enemies {
+        let nearest_player = player_query
+            .iter()
+            .min_by(|a, b| enemy_pos.distance(a).total_cmp(&enemy_pos.distance(b)));
+
+        let Some(player_pos) = nearest_player else {
+            *velocity = Velocity::ZERO;
+            continue;
+        };
+
         let distance = enemy_pos.distance(player_pos);
         if distance > aggro.range {
             *velocity = Velocity::ZERO;
@@ -105,6 +115,52 @@ mod tests {
         let velocity = *world.get::<Velocity>(enemy).unwrap();
         assert!(velocity.x > 0.0);
         assert_eq!(velocity.y, 0.0);
+    }
+
+    #[test]
+    fn enemy_ignores_a_downed_player_even_at_melee_range() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.spawn((Player, Downed, Position { x: 0.5, y: 0.0 }));
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 20.0);
+
+        let _ = world.run_system_once(ai_system);
+
+        assert_eq!(*world.get::<Velocity>(enemy).unwrap(), Velocity::ZERO);
+        let events = world.resource::<Messages<AttackRequested>>();
+        let mut cursor = events.get_cursor();
+        assert_eq!(cursor.read(events).count(), 0);
+    }
+
+    #[test]
+    fn enemy_targets_nearest_of_two_players() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        // Regression test: `ai_system` used to pick its target via
+        // `player_query.single()`, which errors (and made every enemy idle,
+        // full stop) as soon as more than one player was connected — this
+        // is the exact two-client scenario that broke in practice.
+        world.spawn((Player, Position { x: 0.5, y: 0.0 }));
+        world.spawn((Player, Position { x: 100.0, y: 0.0 }));
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 20.0);
+
+        let _ = world.run_system_once(ai_system);
+
+        assert_eq!(*world.get::<Velocity>(enemy).unwrap(), Velocity::ZERO);
+        let events = world.resource::<Messages<AttackRequested>>();
+        let mut cursor = events.get_cursor();
+        assert_eq!(cursor.read(events).count(), 1);
+    }
+
+    #[test]
+    fn enemy_idles_when_no_players_are_connected() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 20.0);
+
+        let _ = world.run_system_once(ai_system);
+
+        assert_eq!(*world.get::<Velocity>(enemy).unwrap(), Velocity::ZERO);
     }
 
     #[test]

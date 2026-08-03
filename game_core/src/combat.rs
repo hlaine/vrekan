@@ -5,6 +5,7 @@ use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
 use crate::movement::Position;
+use crate::player::{Downed, Player};
 use crate::DeltaSeconds;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -117,14 +118,33 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
     }
 }
 
+/// A downed entity can't attack — see `attack_system`.
+type Attackers<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Position,
+        &'static MeleeAttack,
+        &'static CombatStats,
+        &'static mut AttackTimer,
+    ),
+    Without<Downed>,
+>;
+
+/// A downed entity can't be targeted — see `attack_system`.
+type AttackTargets<'w, 's> =
+    Query<'w, 's, (Entity, &'static Position), (With<Health>, Without<Downed>)>;
+
 /// Resolves queued `AttackRequested` events: if the attacker is off cooldown,
 /// finds the nearest other entity with `Health` within `MeleeAttack::range`
 /// and applies damage to it, resolved via `resolve_damage` (crit, then the
-/// target's resistance for the attack's `DamageType`).
+/// target's resistance for the attack's `DamageType`). A downed entity can
+/// neither attack nor be targeted — it's out of combat entirely (see
+/// MECHANICS.md's Death, downed state, and revive section).
 pub fn attack_system(
     mut events: MessageReader<AttackRequested>,
-    mut attackers: Query<(&Position, &MeleeAttack, &CombatStats, &mut AttackTimer)>,
-    targets: Query<(Entity, &Position), With<Health>>,
+    mut attackers: Attackers,
+    targets: AttackTargets,
     mut healths: Query<(&mut Health, Option<&Resistances>)>,
 ) {
     let mut rng = rand::rng();
@@ -169,9 +189,22 @@ pub fn attack_system(
     }
 }
 
-pub fn death_system(mut commands: Commands, query: Query<(Entity, &Health)>) {
-    for (entity, health) in &query {
-        if health.is_dead() {
+/// A `Player` at zero health goes `Downed` instead of despawning — see
+/// MECHANICS.md's Death, downed state, and revive section. Everything else
+/// (enemies) despawns outright, same as before that state existed. The
+/// `Without<Downed>` filter keeps this from re-triggering every tick for a
+/// player who's already down.
+pub fn death_system(
+    mut commands: Commands,
+    query: Query<(Entity, &Health, Option<&Player>), Without<Downed>>,
+) {
+    for (entity, health, player) in &query {
+        if !health.is_dead() {
+            continue;
+        }
+        if player.is_some() {
+            commands.entity(entity).insert(Downed);
+        } else {
             commands.entity(entity).despawn();
         }
     }
@@ -379,5 +412,95 @@ mod tests {
 
         assert!(world.get_entity(alive).is_ok());
         assert!(world.get_entity(dead).is_err());
+    }
+
+    #[test]
+    fn death_system_downs_a_player_instead_of_despawning() {
+        let mut world = World::new();
+        let player = world.spawn((Player, Health::new(0.0))).id();
+
+        let _ = world.run_system_once(death_system);
+
+        assert!(world.get_entity(player).is_ok());
+        assert!(world.get::<Downed>(player).is_some());
+    }
+
+    #[test]
+    fn death_system_does_not_reprocess_an_already_downed_player() {
+        let mut world = World::new();
+        let player = world.spawn((Player, Downed, Health::new(0.0))).id();
+
+        let _ = world.run_system_once(death_system);
+
+        assert!(world.get_entity(player).is_ok());
+    }
+
+    #[test]
+    fn attack_system_ignores_a_downed_attacker() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                Downed,
+            ))
+            .id();
+        let target = world
+            .spawn((Position { x: 1.0, y: 0.0 }, Health::new(30.0)))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Health>(target).unwrap().current, 30.0);
+    }
+
+    #[test]
+    fn attack_system_never_selects_a_downed_target() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+            ))
+            .id();
+        world.spawn((Position { x: 1.0, y: 0.0 }, Health::new(30.0), Downed));
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        // No eligible target in range means the attack never resolves, so
+        // the attacker's cooldown never starts.
+        assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 0.0);
     }
 }

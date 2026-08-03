@@ -15,10 +15,11 @@ use bevy_replicon_renet::{
 use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
-use game_core::{DeltaSeconds, Enemy, EnemyKind, LEASH_DISTANCE};
-use protocol::{AttackInput, MoveInput, NetworkPlugin, PROTOCOL_ID, SERVER_PORT};
+use game_core::{DeltaSeconds, Downed, Enemy, EnemyKind, LEASH_DISTANCE};
+use protocol::{AttackInput, MoveInput, NetworkPlugin, ReviveInput, PROTOCOL_ID, SERVER_PORT};
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
+const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
 
 // Only used to look up appearance (color/size) for a replicated enemy by
 // its `EnemyKind` — the server is what actually spawns/simulates enemies
@@ -40,6 +41,11 @@ const MAX_ZOOM: f32 = 1.6;
 // player's leash-limit indicator kicks in.
 const LEASH_WARNING_RATIO: f32 = 0.9;
 const PLAYER_LEASH_WARNING_COLOR: Color = Color::srgb(0.9, 0.15, 0.15);
+
+// Downed is a distinct, unmissable grey — deliberately not just a darker
+// shade of the leash-warning red, since a downed player and a
+// near-the-leash player need to read as different situations at a glance.
+const DOWNED_COLOR: Color = Color::srgb(0.5, 0.5, 0.5);
 
 /// Marks a replicated player entity that isn't ours — rendered, but not a
 /// target for our local AI/attack systems (`game_core::Player` is reserved
@@ -99,7 +105,7 @@ fn main() {
                 player_input_system,
                 sync_transform_system,
                 party_camera_system,
-                leash_indicator_system,
+                player_appearance_system,
             )
                 .chain(),
         )
@@ -173,7 +179,7 @@ fn init_replicated_players(
         } else {
             commands.entity(entity).insert((
                 RemotePlayer,
-                Sprite::from_color(Color::srgb(0.3, 0.5, 0.8), Vec2::splat(32.0)),
+                Sprite::from_color(REMOTE_PLAYER_COLOR, Vec2::splat(32.0)),
                 Transform::default(),
             ));
         }
@@ -216,6 +222,7 @@ fn player_input_system(
     local_player: Res<LocalPlayer>,
     mut move_input: MessageWriter<MoveInput>,
     mut attack_input: MessageWriter<AttackInput>,
+    mut revive_input: MessageWriter<ReviveInput>,
 ) {
     if local_player.0.is_none() {
         return;
@@ -244,6 +251,10 @@ fn player_input_system(
     if keyboard.just_pressed(KeyCode::Space) {
         attack_input.write(AttackInput);
     }
+
+    revive_input.write(ReviveInput {
+        held: keyboard.pressed(KeyCode::KeyF),
+    });
 }
 
 fn sync_transform_system(mut query: Query<(&Position, &mut Transform)>) {
@@ -303,30 +314,46 @@ fn party_camera_system(
     }
 }
 
-/// Tints the local player's sprite when they're near the leash limit. Purely
-/// cosmetic — the boundary itself is enforced server-side, not here (see
-/// DESIGN.md's Camera & movement section); this just reflects that state,
-/// and isn't the real HUD indicator planned for M8.
-fn leash_indicator_system(
+type PartySprites<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static mut Sprite, Has<Downed>),
+    Or<(With<Player>, With<RemotePlayer>)>,
+>;
+
+/// Fully recomputes every party member's sprite color each frame, rather
+/// than overlaying a tint on top of whatever color was there before — that
+/// overlay approach can't un-tint a `RemotePlayer` once `Downed` is
+/// removed (ally-revive), since nothing else runs every frame to restore
+/// their base color. `Downed` wins over the leash-warning tint; only the
+/// local player gets a leash-warning tint at all (the boundary itself is
+/// enforced server-side, see DESIGN.md's Camera & movement section — this
+/// is cosmetic feedback, not the real HUD indicator planned for M8).
+fn player_appearance_system(
     local_player: Res<LocalPlayer>,
     party: PartyPositions,
-    mut sprites: Query<&mut Sprite, With<Player>>,
+    mut sprites: PartySprites,
 ) {
-    let Some((centroid, _)) = party_centroid_and_spread(&party) else {
-        return;
-    };
-    let Some(entity) = local_player.0 else {
-        return;
-    };
-    let (Ok(position), Ok(mut sprite)) = (party.get(entity), sprites.get_mut(entity)) else {
-        return;
-    };
-
-    let distance_from_centroid = Vec2::new(position.x, position.y).distance(centroid);
+    let centroid = party_centroid_and_spread(&party).map(|(centroid, _)| centroid);
     let warning_threshold = (LEASH_DISTANCE / 2.0) * LEASH_WARNING_RATIO;
-    sprite.color = if distance_from_centroid >= warning_threshold {
-        PLAYER_LEASH_WARNING_COLOR
-    } else {
-        PLAYER_COLOR
-    };
+
+    for (entity, mut sprite, downed) in &mut sprites {
+        sprite.color = if downed {
+            DOWNED_COLOR
+        } else if Some(entity) == local_player.0 {
+            let near_leash_limit =
+                centroid
+                    .zip(party.get(entity).ok())
+                    .is_some_and(|(centroid, position)| {
+                        Vec2::new(position.x, position.y).distance(centroid) >= warning_threshold
+                    });
+            if near_leash_limit {
+                PLAYER_LEASH_WARNING_COLOR
+            } else {
+                PLAYER_COLOR
+            }
+        } else {
+            REMOTE_PLAYER_COLOR
+        };
+    }
 }

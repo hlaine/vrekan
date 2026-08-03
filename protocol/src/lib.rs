@@ -2,7 +2,7 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
-use game_core::{Enemy, EnemyKind, Health, Position};
+use game_core::{Downed, Enemy, EnemyKind, Health, Position};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
@@ -37,6 +37,17 @@ pub struct MoveInput {
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttackInput;
 
+/// Sent every frame while the player holds the revive/interact button, same
+/// continuous-state pattern as `MoveInput` — a dropped frame self-corrects
+/// on the next one, so `Channel::Unreliable` is fine here too (see
+/// `AttackInput`'s doc comment for why the "reliable" channels in this
+/// dependency stack aren't actually worth reaching for even for a discrete
+/// action, let alone a continuous one like this).
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviveInput {
+    pub held: bool,
+}
+
 /// Registers everything that crosses the network, so the client and server
 /// binaries can't independently drift on what's replicated or which
 /// messages exist between them.
@@ -49,7 +60,9 @@ impl Plugin for NetworkPlugin {
             .replicate::<Health>()
             .replicate::<Enemy>()
             .replicate::<EnemyKind>()
+            .replicate::<Downed>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
-            .add_client_message::<AttackInput>(Channel::Unreliable);
+            .add_client_message::<AttackInput>(Channel::Unreliable)
+            .add_client_message::<ReviveInput>(Channel::Unreliable);
     }
 }

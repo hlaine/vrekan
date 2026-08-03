@@ -2,13 +2,15 @@ pub mod combat;
 pub mod enemy;
 pub mod movement;
 pub mod player;
+pub mod revive;
 
 pub use combat::{
     AttackRequested, AttackTimer, CombatStats, DamageType, Health, MeleeAttack, Resistances,
 };
 pub use enemy::{Aggro, Enemy, EnemyKind};
 pub use movement::{leash_system, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
-pub use player::Player;
+pub use player::{Downed, Player};
+pub use revive::{revive_system, Reviving};
 
 use bevy_ecs::prelude::*;
 
