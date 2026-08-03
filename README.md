@@ -79,7 +79,7 @@ Run both from the repo root — the client loads enemy templates from
 `assets/enemies/` relative to the current directory. Controls: **WASD** to
 move (sent to the server, which simulates and replicates position back),
 **Space** to melee-attack the nearest enemy in range (still local-only for
-now).
+now), **F** (hold) to revive a downed ally standing nearby.
 
 For local co-op testing on one machine, run one server and up to two client
 instances (`ROADMAP`/`DESIGN` party cap for v1) — each client connects to

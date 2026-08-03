@@ -69,17 +69,38 @@ Claude Code tasks as you start it, not all upfront.
   `game_core::combat::attack_system`; the client only renders replicated
   state. Enemy death (despawn on zero health) confirmed working end-to-end
   in a live two-client playtest — see `DECISIONS.md` if this needs
-  revisiting.
+  revisiting. Caveat found later, during ally-revive testing: that
+  confirmation was for player-initiated attacks only. Enemy-initiated
+  attacks (`game_core::enemy::ai_system`) didn't actually work with two
+  clients connected until the fix described in `DECISIONS.md` — see that
+  entry before treating "combat works across client/server" as fully
+  verified for anything AI-driven.
 - [ ] Generic status-effect system (stun, bleed, buffs — stackable,
   duration-based, attachable to any attack via data)
-- [ ] Player death → "downed" state (not respawn) — see `MECHANICS.md` for
-  the downed/revive/wipe rules. Confirmed as a real, current gap: today
-  `death_system` despawns any zero-health entity indiscriminately, so a
-  player reaching 0 HP is despawned like an enemy — which tears down that
-  client's connection outright rather than downing them. This is expected
-  to be fixed by this milestone item, not a new regression.
-- [ ] Ally-revive: teammate walks to a downed player and presses an action
-  button to revive them
+- [x] Player death → "downed" state (not respawn) — see `MECHANICS.md` for
+  the downed/revive/wipe rules. `death_system` now branches on a `Player`
+  marker: a player at zero health gets a new `Downed` component instead of
+  being despawned; everything else (enemies) despawns as before. `Downed`
+  entities are excluded from `attack_system`'s target/attacker queries and
+  `ai_system`'s player-targeting query — out of combat entirely, matching
+  `MECHANICS.md`. Replicated so the client can show a distinct grey tint
+  (`client`'s `player_appearance_system`) instead of the downed state
+  reading as "input stopped working," the exact confusing symptom this gap
+  caused during M4 testing (see `DECISIONS.md`). Full-wipe auto-respawn and
+  resurrection-point checkpointing are explicitly M5 scope, not touched
+  here — a downed player with no one left to revive them just waits, which
+  is correct until M5 lands.
+- [x] Ally-revive: a non-downed ally holding **F** within `REVIVE_RANGE`
+  (60 units, matching `PLAYER_ATTACK_RANGE`) accumulates `ReviveProgress`
+  on the downed entity in `game_core::revive::revive_system`; reaching
+  `REVIVE_DURATION_SECS` (3s) restores `REVIVE_HEALTH_FRACTION` (50%) of
+  max health and clears `Downed`. Progress isn't banked — walking out of
+  range or letting go resets it to zero, a reasonable starting assumption
+  per `MECHANICS.md`'s open questions, not a tuned/settled number. New
+  `protocol::ReviveInput { held: bool }` client message, sent every frame
+  like `MoveInput` (continuous state, `Channel::Unreliable`). No revive
+  progress bar yet — that's M8 HUD work; the only client feedback today is
+  the downed tint clearing once revived.
 
 ## M5 — Progression: leveling & stats
 - [ ] XP, character level, manual stat point allocation on level up — see

@@ -399,3 +399,121 @@ damage types exist (M4's later tiers), worth revisiting: e.g. a content
 crate test that cross-checks every enemy template's damage-type strings and
 resistance keys against a canonical list, without giving up the
 data-driven-ness of the type itself.
+
+---
+
+## Downed state is a marker component, not a separate life-cycle state machine (M4)
+
+**Context:** M4's remaining "player death → downed state" item needed
+`death_system` to stop despawning players outright (see this file's "Player
+death currently disconnects the client" entry for why that was breaking
+connections). The options were something heavier — an explicit player
+life-cycle enum (`Alive`/`Downed`/`Dead`) driving a state machine — versus
+just adding a marker component alongside the existing `Health`.
+
+**Decision:** A plain unit-struct `Downed` component (in `game_core::player`,
+next to `Player`), inserted by `death_system` on a `Player` entity that
+reaches zero health, never removed by anything yet (ally-revive, the very
+next roadmap item, will be what removes it). `attack_system`'s attacker and
+target queries, and `ai_system`'s player-targeting query, all gained a
+`Without<Downed>` filter — a downed entity is simply invisible to combat
+resolution and enemy AI, rather than being specially handled inside them.
+Replicated (`protocol::NetworkPlugin`) so the client can render it. On the
+server, `apply_move_input` also filters `Without<Downed>` and a new
+`on_player_downed` observer (mirroring `on_client_connected`'s existing
+observer pattern) zeroes the entity's `LinearVelocity` at the moment of
+transition, so a player who dies mid-slide doesn't keep coasting.
+
+**Consequences:** This keeps "downed" as pure ECS composition — any system
+that shouldn't apply to a downed player just adds one query filter, instead
+of a central state machine every such system would need to consult. The
+tradeoff is there's no single place that enumerates "what downed means";
+that meaning is spread across each filtered query. This has stayed cheap
+enough (four call sites total) to be worth it over a state-machine
+abstraction for a single boolean-ish state. Revisit if a third player state
+shows up beyond alive/downed (e.g. M5's full-wipe handling needs its own
+state) and the marker-component-per-system-filter approach starts feeling
+scattered rather than simple.
+
+---
+
+## Ally-revive: no banked progress, and client sprite color is fully recomputed, not overlaid (M4)
+
+**Context:** Ally-revive needed a hold-to-channel interaction
+(`MECHANICS.md`: "holds/presses an action button... in place"), with exact
+range/timing explicitly called out there as "a reasonable starting
+assumption, not a settled decision." Two implementation choices came up
+that were non-obvious enough to record.
+
+**Decision 1 — progress isn't banked across separate attempts.**
+`game_core::revive::ReviveProgress` on the downed entity is dropped
+entirely (not paused) the instant no `Reviving` ally is within
+`REVIVE_RANGE` — walking away or letting go at 2.9s of a 3s channel means
+starting over from zero, not resuming from 2.9s later. Simpler to reason
+about and implement (one `bool` check per tick, no separate "paused since"
+bookkeeping), and defensible as a starting assumption exactly because
+`MECHANICS.md` flagged this as unsettled — revisit if playtesting makes
+losing near-complete progress to a brief interruption feel bad.
+
+**Decision 2 — `client`'s per-frame sprite-color systems were merged, not
+extended.** Adding revive means `Downed` gets removed again, and the
+existing `leash_indicator_system` (local player only) plus
+`downed_indicator_system` (both, added for the downed-state milestone item)
+only ever *overlaid* a tint on top of whatever color was already set —
+neither recomputed a `RemotePlayer`'s base color from scratch each frame.
+Without a third change, a revived `RemotePlayer` would stay grey forever:
+nothing runs every frame to put their blue color back once `Downed` is
+gone. Rather than patch this with a `RemovedComponents<Downed>` special
+case, both systems were replaced with one `player_appearance_system` that
+recomputes every party member's color from current state every frame
+(`Downed` → grey, else local-near-leash-limit → warning red, else
+local/remote → their base color). No system now assumes "whatever color is
+already there is correct except for this one thing I might change."
+
+**Consequences:** Any future transient visual state on a player sprite
+(e.g. a stun/status-effect tint in the upcoming status-effect system)
+should extend `player_appearance_system`'s single `if`/`else` chain rather
+than adding another standalone tint-overlay system — that's exactly the
+shape of bug this decision closed off.
+
+---
+
+## Found via testing: enemies never attacked anyone with two clients connected (M4)
+
+**Context:** While manually playtesting ally-revive with two clients
+connected, enemies didn't attack at all — not "attacked the wrong player,"
+not "attacked intermittently," just never engaged, for the whole session.
+Root cause: `game_core::enemy::ai_system` picked its target with
+`player_query.single()`, which only returns `Ok` when *exactly one* entity
+matches the query. With two clients connected there are two `Player`
+entities, so `.single()` returned `Err` every tick and the function
+returned immediately before touching any enemy — regardless of either
+player's position, aggro range, or anything else. This had been true since
+`ai_system` was first written (single-player-shaped code that was never
+updated when networked multiplayer landed), not something introduced by
+recent work.
+
+This also means M4's "combat works correctly across client/server" item
+(checked off after "a live two-client playtest") was only actually
+confirmed for player-initiated attacks (`attack_system` off an `AttackInput`
+message, unaffected by this bug) and one enemy-kills-player instance that,
+in hindsight, must have happened with only one client connected at the
+time — not for enemy-initiated attacks with a real two-player party, which
+is the scenario this bug fully broke.
+
+**Decision:** Changed `ai_system` to pick each enemy's target independently
+via `player_query.iter().min_by(...)` on distance (the same nearest-target
+pattern already used in `combat::attack_system`), instead of assuming
+there's exactly one player. Zero matching players (all disconnected, or the
+sole player downed) now falls out naturally as "no target found" rather
+than as a distinguished `.single()` error case.
+
+**Consequences:** Different enemies can now chase different players
+simultaneously, which is the actually-intended co-op behavior, not an
+extension beyond it. Added `enemy_targets_nearest_of_two_players` and
+`enemy_idles_when_no_players_are_connected` as regression tests in
+`game_core::enemy` — the former reproduces the exact broken scenario. Any
+future system that queries for "the player" via `.single()` (there's
+nothing else doing this today, but worth checking before adding one) should
+be treated as suspect the moment the system is meant to work with a full
+co-op party, not just a lone developer testing solo.
