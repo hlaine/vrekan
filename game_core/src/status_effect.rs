@@ -4,10 +4,13 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{apply_damage, DamageType, Health, Resistances};
 use crate::DeltaSeconds;
 
-/// Which stat a `StatModifier` effect (or, since M7, a socketed rune)
-/// adjusts. A small fixed set — extend only once a new stat is actually
-/// wired up somewhere, not speculatively.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+/// Which stat a `StatModifier` effect (or, since M7, a socketed rune, or
+/// since M8, a manually-allocated `Stats` point) adjusts. A small fixed
+/// set — extend only once a new stat is actually wired up somewhere, not
+/// speculatively. `Serialize` (added in M8) is for
+/// `protocol::AllocateStatPointInput`'s payload — every other use is
+/// server/content-local and never needed to cross the wire before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Stat {
     CritChance,
     CritMultiplier,

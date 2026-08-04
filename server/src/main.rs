@@ -31,18 +31,18 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    apply_death_xp_penalty, equip_item, pickup_loot, reset_xp_on_full_wipe, revive_system,
-    skill_cast_system, socket_rune, tick_od_regen, tick_skill_cooldowns, tick_status_effects,
-    unequip_item, unsocket_rune, ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind,
-    EffectTarget, Enemy, Equipment, Facing, Inventory, ItemDrop, ItemLibrary, KnownSkills, Level,
-    MoveSpeed, Od, Player, Position, Reviving, RuneInventory, RuneLibrary, SkillCastRequested,
-    SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned, UnspentSkillPoints,
-    UnspentStatPoints, Velocity,
+    allocate_stat_point, apply_death_xp_penalty, equip_item, learn_skill, pickup_loot,
+    reset_xp_on_full_wipe, revive_system, skill_cast_system, socket_rune, tick_od_regen,
+    tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, ActiveEffects,
+    DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy, Equipment, Facing,
+    Inventory, ItemDrop, ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position,
+    Reviving, RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary,
+    StackMode, Stat, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity,
 };
 use protocol::{
-    AttackInput, CastSkillInput, ConnectAuth, EquipItemInput, MoveInput, NetworkPlugin,
-    PickupItemInput, ReviveInput, SocketRuneInput, UnequipItemInput, UnsocketRuneInput,
-    PROTOCOL_ID, SERVER_PORT,
+    AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
+    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SocketRuneInput,
+    UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_SPEED: f32 = 200.0;
@@ -206,6 +206,8 @@ fn main() {
                     apply_unequip_input,
                     apply_socket_rune_input,
                     apply_unsocket_rune_input,
+                    apply_allocate_stat_point_input,
+                    apply_learn_skill_input,
                 )
                     .chain(),
             )
@@ -939,6 +941,43 @@ fn apply_unsocket_rune_input(
             input.slot,
             input.socket_index,
         );
+    }
+}
+
+/// Turns a client's `AllocateStatPointInput` into
+/// `game_core::allocate_stat_point`'s resolution — a no-op if there's no
+/// unspent point (see that function's doc comment).
+fn apply_allocate_stat_point_input(
+    mut inputs: MessageReader<FromClient<AllocateStatPointInput>>,
+    mut players: Query<(&mut UnspentStatPoints, &mut Stats)>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut unspent, mut stats)) = players.get_mut(entity) else {
+            continue;
+        };
+        allocate_stat_point(&mut unspent, &mut stats, input.stat);
+    }
+}
+
+/// Turns a client's `LearnSkillInput` into `game_core::learn_skill`'s
+/// resolution — a no-op for an unknown skill id or an empty point stack
+/// (see that function's doc comment).
+fn apply_learn_skill_input(
+    mut inputs: MessageReader<FromClient<LearnSkillInput>>,
+    mut players: Query<(&mut UnspentSkillPoints, &mut KnownSkills)>,
+    skills: Res<SkillLibrary>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut unspent, mut known)) = players.get_mut(entity) else {
+            continue;
+        };
+        learn_skill(&mut unspent, &mut known, &skills, &input.skill_id);
     }
 }
 

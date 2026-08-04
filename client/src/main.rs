@@ -21,13 +21,14 @@ use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
-    DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health,
-    Inventory, Item, ItemDrop, Od, SkillCooldowns, Stunned, LEASH_DISTANCE,
+    xp_required, DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing,
+    Health, Inventory, Item, ItemDrop, KnownSkills, Level, Od, SkillCooldowns, Stat, Stats,
+    Stunned, UnspentSkillPoints, UnspentStatPoints, LEASH_DISTANCE,
 };
 use protocol::{
-    AttackInput, CastSkillInput, ConnectAuth, EquipItemInput, MoveInput, NetworkPlugin,
-    PickupItemInput, ReviveInput, SocketRuneInput, UnequipItemInput, UnsocketRuneInput,
-    PROTOCOL_ID, SERVER_PORT,
+    AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
+    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SocketRuneInput,
+    UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
@@ -57,6 +58,11 @@ const PICKUP_KEY: KeyCode = KeyCode::KeyE;
 /// M7's `F1`-`F6` equip/unequip hotkey stand-ins, which are removed now
 /// that the panel exists (not kept alongside it, per `ROADMAP.md`).
 const INVENTORY_TOGGLE_KEY: KeyCode = KeyCode::KeyI;
+
+/// Opens/closes the character panel (`character_panel_system`) — stat
+/// allocation and skill learning, the two gaps `UnspentStatPoints`/
+/// `UnspentSkillPoints` have had since M5/M6.
+const CHARACTER_TOGGLE_KEY: KeyCode = KeyCode::KeyC;
 
 /// Sockets/unsockets a rune into the weapon's first socket — hardcoded to
 /// one slot/index and the two rune ids this pass's content actually has,
@@ -139,6 +145,11 @@ struct LocalPlayer(Option<Entity>);
 #[derive(Resource, Default)]
 struct InventoryOpen(bool);
 
+/// Whether the character panel (`character_panel_system`) is currently
+/// shown — same `egui::Window::open`-driven toggle shape as `InventoryOpen`.
+#[derive(Resource, Default)]
+struct CharacterPanelOpen(bool);
+
 /// Enemy templates loaded purely for appearance lookup (color/size) by
 /// `EnemyKind` — see `init_replicated_enemies`. Simulation-relevant fields
 /// (health, damage, AI ranges) only matter server-side now.
@@ -173,6 +184,7 @@ fn main() {
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
         .init_resource::<InventoryOpen>()
+        .init_resource::<CharacterPanelOpen>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
@@ -188,6 +200,7 @@ fn main() {
                 facing_indicator_system,
                 hud_system,
                 inventory_panel_system,
+                character_panel_system,
             )
                 .chain(),
         )
@@ -374,6 +387,7 @@ fn player_input_system(
     mut pickup_input: MessageWriter<PickupItemInput>,
     mut socket_rune_input: MessageWriter<SocketRuneInput>,
     mut unsocket_rune_input: MessageWriter<UnsocketRuneInput>,
+    mut character_panel_open: ResMut<CharacterPanelOpen>,
 ) {
     if local_player.0.is_none() {
         return;
@@ -432,6 +446,10 @@ fn player_input_system(
 
     if keyboard.just_pressed(INVENTORY_TOGGLE_KEY) {
         inventory_open.0 = !inventory_open.0;
+    }
+
+    if keyboard.just_pressed(CHARACTER_TOGGLE_KEY) {
+        character_panel_open.0 = !character_panel_open.0;
     }
 
     if keyboard.just_pressed(PICKUP_KEY) {
@@ -737,5 +755,123 @@ fn inventory_panel_system(
     }
     if let Some(slot) = unequip_clicked {
         unequip_input.write(UnequipItemInput { slot });
+    }
+}
+
+/// Label + the `Stat` variant `AllocateStatPointInput` carries, for each
+/// stat the character panel lets a player allocate into. `bonus_max_health`
+/// isn't listed: `Stat` has no matching variant (see its doc comment in
+/// `game_core::status_effect`), so there's no way to construct a message
+/// for it in the first place.
+const ALLOCATABLE_STATS: [(&str, Stat); 3] = [
+    ("Move Speed", Stat::MoveSpeed),
+    ("Crit Chance", Stat::CritChance),
+    ("Crit Multiplier", Stat::CritMultiplier),
+];
+
+fn stat_bonus(stats: &Stats, stat: Stat) -> f32 {
+    match stat {
+        Stat::MoveSpeed => stats.bonus_move_speed,
+        Stat::CritChance => stats.bonus_crit_chance,
+        Stat::CritMultiplier => stats.bonus_crit_multiplier,
+    }
+}
+
+type LocalPlayerCharacter<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Level,
+        &'static UnspentStatPoints,
+        &'static Stats,
+        &'static UnspentSkillPoints,
+        &'static KnownSkills,
+    ),
+>;
+
+/// Click-driven level-up panel: stat-point allocation (flat list, `+1` per
+/// click via `AllocateStatPointInput`) and skill learning (`Learn`/`+1` via
+/// `LearnSkillInput`) — the two gaps `UnspentStatPoints`/`UnspentSkillPoints`
+/// have had since M5/M6 (M8 step 2 already wired the stat bonuses into
+/// combat/movement, so this panel is meaningful from the moment it exists).
+/// Skill rows reuse `SKILL_HOTKEYS`' fixed id list rather than a client-side
+/// `SkillLibrary` (which doesn't exist) — same placeholder-content pattern
+/// as the HUD's cooldown rows. Flat spend-a-point list, no prerequisite
+/// tree topology: nothing in `MECHANICS.md`/`DESIGN.md` specifies an actual
+/// tree shape.
+fn character_panel_system(
+    mut contexts: EguiContexts,
+    local_player: Res<LocalPlayer>,
+    mut panel_open: ResMut<CharacterPanelOpen>,
+    query: LocalPlayerCharacter,
+    mut allocate_input: MessageWriter<AllocateStatPointInput>,
+    mut learn_input: MessageWriter<LearnSkillInput>,
+) {
+    if !panel_open.0 {
+        return;
+    }
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok((level, stat_points, stats, skill_points, known_skills)) = query.get(entity) else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut allocate_clicked = None;
+    let mut learn_clicked = None;
+
+    egui::Window::new("Character")
+        .open(&mut panel_open.0)
+        .show(ctx, |ui| {
+            ui.heading(format!(
+                "Level {} (XP {:.0}/{:.0})",
+                level.level,
+                level.xp,
+                xp_required(level.level)
+            ));
+
+            ui.separator();
+            ui.heading(format!("Stat points: {}", stat_points.0));
+            for (label, stat) in ALLOCATABLE_STATS {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{label}: +{:.2}", stat_bonus(stats, stat)));
+                    if ui
+                        .add_enabled(stat_points.0 > 0, egui::Button::new("+1"))
+                        .clicked()
+                    {
+                        allocate_clicked = Some(stat);
+                    }
+                });
+            }
+
+            ui.separator();
+            ui.heading(format!("Skill points: {}", skill_points.0));
+            for (_, skill_id) in SKILL_HOTKEYS {
+                let skill_level = known_skills.0.get(skill_id).copied().unwrap_or(0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("{skill_id}: level {skill_level}"));
+                    let button_label = if skill_level == 0 { "Learn" } else { "+1" };
+                    if ui
+                        .add_enabled(skill_points.0 > 0, egui::Button::new(button_label))
+                        .clicked()
+                    {
+                        learn_clicked = Some(skill_id);
+                    }
+                });
+            }
+        });
+
+    // Deferred until after `show` closes — same reason as
+    // `inventory_panel_system`'s deferred writes.
+    if let Some(stat) = allocate_clicked {
+        allocate_input.write(AllocateStatPointInput { stat });
+    }
+    if let Some(skill_id) = learn_clicked {
+        learn_input.write(LearnSkillInput {
+            skill_id: skill_id.to_string(),
+        });
     }
 }

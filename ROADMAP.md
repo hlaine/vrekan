@@ -323,13 +323,35 @@ starting found two gaps folded in below (marked "found via review").
   session) — that path leans entirely on `game_core::item::equip_item`'s
   existing unit tests plus the unchanged server handlers, since the only
   new code is which client input triggers the same message.
-6. [ ] Level-up / stat-allocation panel (new `AllocateStatPointInput`
+6. [x] Level-up / stat-allocation panel (new `AllocateStatPointInput`
   message — `UnspentStatPoints` has had nowhere to go since M5) and a
   skill-learning panel (new `LearnSkillInput` message — same gap for
-  `UnspentSkillPoints`/`KnownSkills` since M6). Meaningful from the
-  moment it exists since step 2 already wired the bonuses in. Flat
-  spend-a-point list, no prerequisite tree topology — nothing in
-  `MECHANICS.md`/`DESIGN.md` specifies an actual tree shape.
+  `UnspentSkillPoints`/`KnownSkills` since M6), combined into one
+  `C`-toggled "Character" window. Meaningful from the moment it exists
+  since step 2 already wired the stat bonuses in. Flat spend-a-point
+  list, no prerequisite tree topology — nothing in `MECHANICS.md`/
+  `DESIGN.md` specifies an actual tree shape; learning an already-known
+  skill again just increments its level (`KnownSkills`' existing "starts
+  at 1, no unranked state" shape).
+  `game_core::allocate_stat_point`/`learn_skill` do the actual spend
+  (unit-tested: 3 tests each, covering the reject-when-empty and
+  accumulate-across-spends cases); `Stat` (already the type
+  `RuneDefinition`/`StatModifier` use) gained `Serialize` so it could
+  become `AllocateStatPointInput`'s payload — no new parallel enum
+  needed, and its match in `allocate_stat_point` is exhaustive without a
+  `MaxHealth` case since `Stat` itself has none (see its doc comment for
+  why that stat stays deferred). `UnspentStatPoints`/`UnspentSkillPoints`
+  are now replicated (previously weren't) so the panel can show real
+  counts and disable a button once a stat/skill has no point left to
+  spend. Confirmed live: a fresh character's panel showed `Level 1 (XP
+  0/100)`, all three stat rows at `+0.00` with a disabled `+1`, and all
+  three skills at `level 0` with a disabled `Learn` — correct given zero
+  points — plus the `C` toggle cleanly opening and closing it. Didn't
+  farm the ~10 kills needed to reach a real level-up and exercise the
+  enabled/clickable path live, for the same reason M8 step 5 stopped
+  short of live-clicking Equip: the input-simulation risk to the
+  developer's own session wasn't worth it given `allocate_stat_point`/
+  `learn_skill` are already directly unit-tested.
 7. [ ] Generic `Interactable` system (`game_core::interact`): proximity +
   action button (`E`, same key as pickup — checks interactables first,
   falls back to nearest item drop). **Corrected via review:** replicates

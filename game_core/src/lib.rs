@@ -20,13 +20,14 @@ pub use item::{
 pub use movement::{leash_system, Facing, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
 pub use player::{Downed, Player};
 pub use progression::{
-    apply_death_xp_penalty, grant_xp, reset_xp_on_full_wipe, xp_required, Level, Stats,
-    UnspentStatPoints, XpReward,
+    allocate_stat_point, apply_death_xp_penalty, grant_xp, reset_xp_on_full_wipe, xp_required,
+    Level, Stats, UnspentStatPoints, XpReward,
 };
 pub use revive::{revive_system, Reviving};
 pub use skill::{
-    skill_cast_system, tick_od_regen, tick_skill_cooldowns, KnownSkills, Od, SkillCastRequested,
-    SkillCooldowns, SkillDefinition, SkillKind, SkillLibrary, UnspentSkillPoints,
+    learn_skill, skill_cast_system, tick_od_regen, tick_skill_cooldowns, KnownSkills, Od,
+    SkillCastRequested, SkillCooldowns, SkillDefinition, SkillKind, SkillLibrary,
+    UnspentSkillPoints,
 };
 pub use status_effect::{
     tick_status_effects, ActiveEffects, EffectDefinition, EffectKind, EffectTarget, StackMode,

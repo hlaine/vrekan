@@ -4,7 +4,8 @@ use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
     AttackTimer, Downed, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health, Inventory,
-    ItemDrop, KnownSkills, Level, Od, Position, RuneInventory, SkillCooldowns, Stats, Stunned,
+    ItemDrop, KnownSkills, Level, Od, Position, RuneInventory, SkillCooldowns, Stat, Stats,
+    Stunned, UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,9 +75,8 @@ pub struct PickupItemInput;
 
 /// Equips `inventory_index` from the player's own `Inventory` — no
 /// `EquipSlot` needed from the client, since the item's own template
-/// determines that server-side (see `game_core::equip_item`). Hotkey-
-/// driven client-side as a stand-in for the real inventory UI (M8), same
-/// pattern as M6's skill-cast hotkeys.
+/// determines that server-side (see `game_core::equip_item`). Sent by the
+/// M8 inventory panel's Equip button.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EquipItemInput {
     pub inventory_index: usize,
@@ -104,6 +104,22 @@ pub struct SocketRuneInput {
 pub struct UnsocketRuneInput {
     pub slot: EquipSlot,
     pub socket_index: usize,
+}
+
+/// Sent by the M8 stat-allocation panel's `+1` button — spends one
+/// `UnspentStatPoints` into `stat` via `game_core::allocate_stat_point`.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocateStatPointInput {
+    pub stat: Stat,
+}
+
+/// Sent by the M8 skill-learning panel's Learn/`+1` button — spends one
+/// `UnspentSkillPoints` to learn or upgrade `skill_id` via
+/// `game_core::learn_skill`. Same "replicate a template key" shape as
+/// `CastSkillInput::skill_id`.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LearnSkillInput {
+    pub skill_id: String,
 }
 
 /// Fixed size of netcode's connection-time `user_data` field (see
@@ -202,6 +218,8 @@ impl Plugin for NetworkPlugin {
             .replicate::<ItemDrop>()
             .replicate::<AttackTimer>()
             .replicate::<SkillCooldowns>()
+            .replicate::<UnspentStatPoints>()
+            .replicate::<UnspentSkillPoints>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable)
@@ -210,7 +228,9 @@ impl Plugin for NetworkPlugin {
             .add_client_message::<EquipItemInput>(Channel::Unreliable)
             .add_client_message::<UnequipItemInput>(Channel::Unreliable)
             .add_client_message::<SocketRuneInput>(Channel::Unreliable)
-            .add_client_message::<UnsocketRuneInput>(Channel::Unreliable);
+            .add_client_message::<UnsocketRuneInput>(Channel::Unreliable)
+            .add_client_message::<AllocateStatPointInput>(Channel::Unreliable)
+            .add_client_message::<LearnSkillInput>(Channel::Unreliable);
     }
 }
 

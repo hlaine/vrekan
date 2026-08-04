@@ -108,21 +108,42 @@ pub enum SkillKind {
 pub struct SkillLibrary(pub HashMap<String, SkillDefinition>);
 
 /// A character's currently-known skills, gated behind spending
-/// `UnspentSkillPoints` in the not-yet-built (M8) skill-tree UI — see
-/// DESIGN.md's menus list. Keyed by the skill's content-file id, valued by
-/// its upgrade level (starts at 1 once known; there's no "known but
-/// unranked" state). Empty for every character right now: nothing is
-/// castable until that UI exists to spend points and populate this — same
-/// "accumulate now, gated later" shape as M5's `Stats`/`UnspentStatPoints`,
-/// not a gap to patch around before then.
+/// `UnspentSkillPoints` via `learn_skill` — see DESIGN.md's menus list.
+/// Keyed by the skill's content-file id, valued by its upgrade level
+/// (starts at 1 once known; there's no "known but unranked" state, so
+/// spending an additional point on an already-known skill just increments
+/// it — the flat "no prerequisite tree" shape ROADMAP.md's M8 entry calls
+/// for).
 #[derive(Component, Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnownSkills(pub HashMap<String, u32>);
 
-/// Points banked from leveling up, spent to unlock/upgrade a skill once the
-/// M8 skill-tree UI exists — granted by `progression::grant_xp` alongside
+/// Points banked from leveling up, spent to unlock/upgrade a skill via
+/// `learn_skill` — granted by `progression::grant_xp` alongside
 /// `UnspentStatPoints`, same per-level-up shape.
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UnspentSkillPoints(pub u32);
+
+/// Spends one `UnspentSkillPoints` to learn (or upgrade) `skill_id` in
+/// `known` — an M8 panel calls this once per button click, same
+/// reject-a-no-op-untrusted-input shape as `item::equip_item`. Rejects
+/// (returns `false`, no state changed) an unknown skill id or an empty
+/// point stack.
+pub fn learn_skill(
+    unspent: &mut UnspentSkillPoints,
+    known: &mut KnownSkills,
+    skills: &SkillLibrary,
+    skill_id: &str,
+) -> bool {
+    if !skills.0.contains_key(skill_id) {
+        return false;
+    }
+    if unspent.0 == 0 {
+        return false;
+    }
+    unspent.0 -= 1;
+    *known.0.entry(skill_id.to_string()).or_insert(0) += 1;
+    true
+}
 
 /// Remaining cooldown, in seconds, per skill id currently on cooldown for
 /// this caster. Absence of an entry means "ready", not "zero cooldown" —
@@ -434,6 +455,69 @@ mod tests {
         let cooldowns = &world.get::<SkillCooldowns>(entity).unwrap().0;
         assert!((cooldowns["power_strike"] - 0.5).abs() < 1e-4);
         assert!(!cooldowns.contains_key("aoe_burst"));
+    }
+
+    #[test]
+    fn learn_skill_spends_a_point_and_sets_the_skill_to_level_one() {
+        let mut unspent = UnspentSkillPoints(2);
+        let mut known = KnownSkills::default();
+        let library = power_strike_library();
+
+        assert!(learn_skill(
+            &mut unspent,
+            &mut known,
+            &library,
+            "power_strike"
+        ));
+
+        assert_eq!(unspent.0, 1);
+        assert_eq!(known.0["power_strike"], 1);
+    }
+
+    #[test]
+    fn learn_skill_upgrades_an_already_known_skill() {
+        let mut unspent = UnspentSkillPoints(1);
+        let mut known = KnownSkills(HashMap::from([("power_strike".to_string(), 1)]));
+        let library = power_strike_library();
+
+        assert!(learn_skill(
+            &mut unspent,
+            &mut known,
+            &library,
+            "power_strike"
+        ));
+
+        assert_eq!(unspent.0, 0);
+        assert_eq!(known.0["power_strike"], 2);
+    }
+
+    #[test]
+    fn learn_skill_rejects_an_unknown_skill_id() {
+        let mut unspent = UnspentSkillPoints(1);
+        let mut known = KnownSkills::default();
+        let library = power_strike_library();
+
+        assert!(!learn_skill(&mut unspent, &mut known, &library, "mystery"));
+
+        assert_eq!(unspent.0, 1);
+        assert!(known.0.is_empty());
+    }
+
+    #[test]
+    fn learn_skill_rejects_when_no_points_are_unspent() {
+        let mut unspent = UnspentSkillPoints(0);
+        let mut known = KnownSkills::default();
+        let library = power_strike_library();
+
+        assert!(!learn_skill(
+            &mut unspent,
+            &mut known,
+            &library,
+            "power_strike"
+        ));
+
+        assert_eq!(unspent.0, 0);
+        assert!(known.0.is_empty());
     }
 
     fn power_strike_library() -> SkillLibrary {

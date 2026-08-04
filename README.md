@@ -79,8 +79,9 @@ Run both from the repo root — the client loads enemy templates from
 move (sent to the server, which simulates and replicates position back),
 **Space** to melee-attack the nearest enemy in range, **F** (hold) to
 revive a downed ally standing nearby, **I** to open/close the inventory
-panel (equip/unequip items by clicking them — an in-progress M8 menu, not
-the final UI).
+panel (equip/unequip items by clicking them), **C** to open/close the
+character panel (spend stat/skill points) — both in-progress M8 menus, not
+the final UI.
 
 **Connecting:** each client generates a persistent character ID on first
 run (saved to `character_id.txt` next to where you ran it) and prompts in
