@@ -1,5 +1,6 @@
 pub mod combat;
 pub mod enemy;
+pub mod interact;
 pub mod item;
 pub mod movement;
 pub mod player;
@@ -12,6 +13,10 @@ pub use combat::{
     AttackRequested, AttackTimer, CombatStats, DamageType, Health, MeleeAttack, Resistances,
 };
 pub use enemy::{Aggro, Enemy, EnemyKind};
+pub use interact::{
+    interact_or_pickup_system, InteractOrPickupRequested, Interactable, InteractableDefinition,
+    InteractableLibrary, PICKUP_RANGE,
+};
 pub use item::{
     equip_item, pickup_loot, roll_loot, socket_rune, unequip_item, unsocket_rune, DroppedLoot,
     EquipSlot, Equipment, Inventory, Item, ItemDefinition, ItemDrop, ItemLibrary, LootEntry,

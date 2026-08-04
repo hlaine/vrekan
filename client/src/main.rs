@@ -17,7 +17,9 @@ use bevy_replicon_renet::{
     renet::ConnectionConfig,
     RenetChannelsExt, RenetClient, RepliconRenetPlugins,
 };
-use content::{load_all_enemy_templates, EnemyTemplate};
+use content::{
+    load_all_enemy_templates, load_all_interactable_templates, EnemyTemplate, InteractableTemplate,
+};
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
@@ -80,6 +82,14 @@ const UNSOCKET_KEY: KeyCode = KeyCode::F9;
 // its `EnemyKind` — the server is what actually spawns/simulates enemies
 // now (see `server/src/main.rs`'s `spawn_enemies`).
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
+
+// Loaded locally purely for `dialog` text lookup by an `Interactable`'s
+// `template_key` — same "server spawns/resolves, client renders" split as
+// `ENEMY_TEMPLATES_DIR`. Nothing places an `Interactable` in the world yet
+// (M8 step 8), and no panel reads `dialog` yet either (step 9), so this
+// resource is loaded but unused for now — same "data ready, UI/content
+// gated behind a later step" shape as M5's `Stats` bonuses.
+const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
 
 // Relative to the assets root (loaded via AssetServer), not the filesystem
 // path used for ENEMY_TEMPLATES_DIR above. Must stay in sync with the
@@ -156,6 +166,16 @@ struct CharacterPanelOpen(bool);
 #[derive(Resource)]
 struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
 
+/// Interactable templates loaded purely for `dialog` text lookup by an
+/// `Interactable`'s `template_key` — see `INTERACTABLE_TEMPLATES_DIR`'s doc
+/// comment for why this is unused today.
+#[derive(Resource)]
+struct InteractableTemplates(
+    // Genuinely unread until M8 step 9's dialog panel exists to look
+    // dialog text up from it — not a stale/dead leftover.
+    #[allow(dead_code)] Vec<(String, InteractableTemplate)>,
+);
+
 fn main() {
     App::new()
         .add_plugins(
@@ -218,6 +238,11 @@ fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
     let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
         .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));
     commands.insert_resource(EnemyTemplates(templates));
+
+    let interactable_templates =
+        load_all_interactable_templates(Path::new(INTERACTABLE_TEMPLATES_DIR))
+            .unwrap_or_else(|error| panic!("failed to load interactable templates: {error}"));
+    commands.insert_resource(InteractableTemplates(interactable_templates));
 }
 
 /// Loads this client's persistent character ID from the given path

@@ -21,8 +21,8 @@ use bevy_replicon_renet::{
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
 };
 use content::{
-    load_all_enemy_templates, load_all_item_templates, load_all_rune_templates,
-    load_all_skill_templates, spawn_enemy,
+    load_all_enemy_templates, load_all_interactable_templates, load_all_item_templates,
+    load_all_rune_templates, load_all_skill_templates, spawn_enemy,
 };
 use game_core::combat::{
     attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, CombatStats,
@@ -31,13 +31,14 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    allocate_stat_point, apply_death_xp_penalty, equip_item, learn_skill, pickup_loot,
-    reset_xp_on_full_wipe, revive_system, skill_cast_system, socket_rune, tick_od_regen,
-    tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, ActiveEffects,
-    DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy, Equipment, Facing,
-    Inventory, ItemDrop, ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position,
-    Reviving, RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary,
-    StackMode, Stat, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity,
+    allocate_stat_point, apply_death_xp_penalty, equip_item, interact_or_pickup_system,
+    learn_skill, reset_xp_on_full_wipe, revive_system, skill_cast_system, socket_rune,
+    tick_od_regen, tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune,
+    ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy,
+    Equipment, Facing, InteractOrPickupRequested, InteractableLibrary, Inventory, ItemDrop,
+    ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving, RuneInventory,
+    RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned,
+    UnspentSkillPoints, UnspentStatPoints, Velocity,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -66,10 +67,6 @@ const PLAYER_FURY_CRIT_CHANCE_BONUS: f32 = 0.05;
 const PLAYER_FURY_DURATION_SECS: f32 = 3.0;
 const PLAYER_OD_MAX: f32 = 100.0;
 const PLAYER_OD_REGEN_RATE: f32 = 5.0;
-// How close a player needs to be to a dropped item/rune to pick it up —
-// tuned loosely against PLAYER_ATTACK_RANGE, not meant to require pixel
-// precision.
-const PICKUP_RANGE: f32 = 50.0;
 const MAX_CLIENTS: usize = 2;
 const TICK_RATE: f64 = 60.0;
 
@@ -78,6 +75,7 @@ const SKILL_TEMPLATES_DIR: &str = "assets/spells";
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 const ITEM_TEMPLATES_DIR: &str = "assets/items";
 const RUNE_TEMPLATES_DIR: &str = "assets/runes";
+const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
 // Enemies spawn in the map's bottom open field (rows 12-14, well clear of
 // the mountain band and the player's top-left spawn point) — see
 // assets/maps/valley.tmx and spawn_map_colliders' coordinate convention.
@@ -152,12 +150,14 @@ fn main() {
         .init_resource::<ActiveCharacters>()
         .add_message::<AttackRequested>()
         .add_message::<SkillCastRequested>()
+        .add_message::<InteractOrPickupRequested>()
         .add_systems(
             Startup,
             (
                 load_game_password,
                 load_skills,
                 load_items,
+                load_interactables,
                 setup,
                 spawn_map_colliders,
                 spawn_enemies,
@@ -202,6 +202,7 @@ fn main() {
                 (
                     tag_item_drops_for_replication,
                     apply_pickup_input,
+                    interact_or_pickup_system,
                     apply_equip_input,
                     apply_unequip_input,
                     apply_socket_rune_input,
@@ -301,6 +302,24 @@ fn load_items(mut commands: Commands) {
         .map(|(id, template)| (id, template.into_definition()))
         .collect();
     commands.insert_resource(RuneLibrary(runes));
+}
+
+/// Loads every interactable template into `Res<InteractableLibrary>` —
+/// same "fail loudly before anyone connects" convention as `load_skills`/
+/// `load_items`. `assets/interactables/` has no real content yet (M8 step
+/// 8 is what actually places blacksmith/runestone-kind `Interactable`s in
+/// the map), so this loads an empty library today — an empty directory
+/// isn't a load error, only a missing one is, so this doesn't need a
+/// special-cased "skip loading" exception to avoid panicking before that
+/// content exists.
+fn load_interactables(mut commands: Commands) {
+    let templates = load_all_interactable_templates(Path::new(INTERACTABLE_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load interactable templates: {error}"));
+    let library = templates
+        .into_iter()
+        .map(|(id, template)| (id, template.into_definition()))
+        .collect();
+    commands.insert_resource(InteractableLibrary(library));
 }
 
 /// Every connected client is represented as an entity with `ConnectedClient`;
@@ -821,36 +840,23 @@ fn apply_revive_input(mut inputs: MessageReader<FromClient<ReviveInput>>, mut co
     }
 }
 
-/// Turns a client's `PickupItemInput` into a pickup of the nearest
-/// `ItemDrop` within `PICKUP_RANGE` — a deliberate button-press action, not
-/// automatic walk-over pickup (see `protocol::PickupItemInput`'s doc
-/// comment). Merges the drop's loot into the picker's own
-/// `Inventory`/`RuneInventory` via `game_core::pickup_loot`, then despawns
-/// the world-visible drop entity.
+/// Turns a client's `PickupItemInput` into an `InteractOrPickupRequested`
+/// event for their own player entity — `game_core::interact_or_pickup_system`
+/// resolves range/priority/effect from there (checks the nearest
+/// `Interactable` in range first, falling back to the nearest `ItemDrop`),
+/// same division of labor as `apply_attack_input`/`attack_system`. The
+/// button itself is still `PickupItemInput` on the wire (see
+/// `DECISIONS.md`'s M8 planning entry: one action button does double duty,
+/// no separate "interact" key needed).
 fn apply_pickup_input(
     mut inputs: MessageReader<FromClient<PickupItemInput>>,
-    mut players: Query<(&Position, &mut Inventory, &mut RuneInventory)>,
-    drops: Query<(Entity, &Position, &ItemDrop)>,
-    mut commands: Commands,
+    mut interact_events: MessageWriter<InteractOrPickupRequested>,
 ) {
     for input in inputs.read() {
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((player_pos, mut inventory, mut runes)) = players.get_mut(entity) else {
-            continue;
-        };
-        let nearest = drops
-            .iter()
-            .filter(|(_, pos, _)| player_pos.distance(pos) <= PICKUP_RANGE)
-            .min_by(|(_, a, _), (_, b, _)| {
-                player_pos.distance(a).total_cmp(&player_pos.distance(b))
-            });
-        let Some((drop_entity, _, drop)) = nearest else {
-            continue;
-        };
-        pickup_loot(&mut inventory, &mut runes, drop.0.clone());
-        commands.entity(drop_entity).despawn();
+        interact_events.write(InteractOrPickupRequested { actor: entity });
     }
 }
 

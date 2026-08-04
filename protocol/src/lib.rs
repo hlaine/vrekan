@@ -3,9 +3,9 @@ use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
-    AttackTimer, Downed, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health, Inventory,
-    ItemDrop, KnownSkills, Level, Od, Position, RuneInventory, SkillCooldowns, Stat, Stats,
-    Stunned, UnspentSkillPoints, UnspentStatPoints,
+    AttackTimer, Downed, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable,
+    Inventory, ItemDrop, KnownSkills, Level, Od, Position, RuneInventory, SkillCooldowns, Stat,
+    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
@@ -220,6 +220,7 @@ impl Plugin for NetworkPlugin {
             .replicate::<SkillCooldowns>()
             .replicate::<UnspentStatPoints>()
             .replicate::<UnspentSkillPoints>()
+            .replicate::<Interactable>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable)

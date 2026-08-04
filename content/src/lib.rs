@@ -1,10 +1,15 @@
 pub mod enemy;
+pub mod interact;
 pub mod item;
 pub mod skill;
 
 pub use enemy::{
     load_all_enemy_templates, load_enemy_template, parse_enemy_template, spawn_enemy,
     EnemyTemplate, LootEntryTemplate, LootKindTemplate,
+};
+pub use interact::{
+    load_all_interactable_templates, load_interactable_template, parse_interactable_template,
+    InteractableTemplate,
 };
 pub use item::{
     load_all_item_templates, load_all_rune_templates, load_item_template, load_rune_template,

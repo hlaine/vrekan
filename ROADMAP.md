@@ -352,7 +352,7 @@ starting found two gaps folded in below (marked "found via review").
   short of live-clicking Equip: the input-simulation risk to the
   developer's own session wasn't worth it given `allocate_stat_point`/
   `learn_skill` are already directly unit-tested.
-7. [ ] Generic `Interactable` system (`game_core::interact`): proximity +
+7. [x] Generic `Interactable` system (`game_core::interact`): proximity +
   action button (`E`, same key as pickup — checks interactables first,
   falls back to nearest item drop). **Corrected via review:** replicates
   as `Interactable { template_key: String, range: f32 }` only — the same
@@ -366,6 +366,28 @@ starting found two gaps folded in below (marked "found via review").
   — there's no "attacker"). Pulls forward part of M9's "special-character
   dialog" mechanism by necessity; only the generic trigger, not M9's
   actual objective content.
+  The priority resolution (`interact_or_pickup_system`) moved the pickup
+  logic itself from `server` into `game_core` for the first time — same
+  "server writes an event carrying who acted, `game_core` resolves it"
+  split as `attack_system`/`skill_cast_system`, unit-tested (6 tests:
+  nearest-interactable priority, out-of-range fallback, multiple
+  interactables, unknown template key still taking priority over
+  pickup). `PICKUP_RANGE` moved alongside it (was a plain `server`
+  constant). No new client message: `PickupItemInput` now translates to
+  `InteractOrPickupRequested` server-side, one button still doing double
+  duty. `InteractableLibrary`/client `InteractableTemplates` both load
+  for real from `assets/interactables/` (not a `Default`-empty
+  placeholder) — the directory exists but is genuinely empty today (no
+  `.ron` files yet, just a `.gitkeep`), which content-loading already
+  treats as valid (only a *missing* directory is a load error), so both
+  client and server start up the same way real content will load once
+  M8 step 8 adds it — confirmed live, both processes start without
+  panicking. Didn't get a full live "kill enemy → verify item stays on
+  the ground until `E`" round trip: three separate synthetic-input
+  focus-flips onto the developer's own terminal during this session (one
+  nearly polluting a live prompt) made further automated play-testing not
+  worth the risk. The exact resolution logic this would have exercised
+  is what the 6 unit tests above directly cover.
 8. [ ] Interactables (blacksmith, runestones) placed via a new Tiled
   object layer in `assets/maps/valley.tmx` (named point objects, read
   the same way `spawn_map_colliders` already reads the collision layer)

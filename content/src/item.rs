@@ -85,10 +85,12 @@ pub fn load_all_rune_templates(dir: &Path) -> Result<Vec<(String, RuneTemplate)>
 
 /// Shared "load every `.ron` file in `dir`, keyed by filename, sorted,
 /// fail on the first malformed one" shape used by both item and rune
-/// loaders (and, separately, `enemy::load_all_enemy_templates`/
+/// loaders, and (since M8) `interact::load_all_interactable_templates`
+/// (and, separately, `enemy::load_all_enemy_templates`/
 /// `skill::load_all_skill_templates`, which predate this helper and
-/// weren't worth refactoring to share it retroactively).
-fn load_all_ron<T>(
+/// weren't worth refactoring to share it retroactively). `pub(crate)`
+/// rather than private now that a second module reuses it.
+pub(crate) fn load_all_ron<T>(
     dir: &Path,
     load_one: impl Fn(&Path) -> Result<T, ContentError>,
 ) -> Result<Vec<(String, T)>, ContentError> {
