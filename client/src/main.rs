@@ -9,7 +9,7 @@ use bevy::gizmos::prelude::*;
 use bevy::prelude::*;
 use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
 use bevy_egui::input::EguiWantsInput;
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::{
@@ -218,11 +218,21 @@ fn main() {
                 party_camera_system,
                 player_appearance_system,
                 facing_indicator_system,
-                hud_system,
-                inventory_panel_system,
-                character_panel_system,
             )
                 .chain(),
+        )
+        // egui's widget interaction (hover/click) only works for `.show()`
+        // calls made from within this schedule — it runs inside egui's own
+        // begin/end-pass wrapper (`PostUpdate`'s `EguiPostUpdateSet::EndPass`,
+        // after our own `Update` chain above has already run, so replicated
+        // state like `LocalPlayer` is current). Panels drawn from plain
+        // `Update` still render (one pass behind), which is why this bug
+        // read as "visible but unclickable" rather than a crash or a blank
+        // panel — found via a live playtest report, not caught by any
+        // automated check, since nothing exercises real mouse clicks.
+        .add_systems(
+            EguiPrimaryContextPass,
+            (hud_system, inventory_panel_system, character_panel_system).chain(),
         )
         .run();
 }

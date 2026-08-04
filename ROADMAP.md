@@ -317,12 +317,17 @@ starting found two gaps folded in below (marked "found via review").
   rendering correctly, and WASD movement plus combat continuing to work
   normally while the panel stayed open (proving the guard doesn't
   suppress the protected keys). Didn't get a live click-through of the
-  Equip button itself (simulating mouse/keyboard input to drive the
-  external game window twice caused the *host* terminal to lose/regain
-  focus unexpectedly, once nearly disrupting the developer's own
-  session) — that path leans entirely on `game_core::item::equip_item`'s
-  existing unit tests plus the unchanged server handlers, since the only
-  new code is which client input triggers the same message.
+  Equip button itself at the time (simulating mouse/keyboard input to
+  drive the external game window twice caused the *host* terminal to
+  lose/regain focus unexpectedly, once nearly disrupting the developer's
+  own session) — that path leaned on `game_core::item::equip_item`'s
+  existing unit tests plus the unchanged server handlers. **Update:**
+  when the user manually tested it afterward, Equip didn't work at all —
+  a real bug this pass's screenshot-only verification couldn't have
+  caught. See `DECISIONS.md`'s "`bevy_egui` 0.41 panels render but don't
+  accept clicks unless drawn from `EguiPrimaryContextPass`" entry for the
+  root cause and fix (all three egui panel systems were in the wrong
+  schedule); confirmed fixed by the same user re-testing live.
 6. [x] Level-up / stat-allocation panel (new `AllocateStatPointInput`
   message — `UnspentStatPoints` has had nowhere to go since M5) and a
   skill-learning panel (new `LearnSkillInput` message — same gap for
@@ -351,7 +356,10 @@ starting found two gaps folded in below (marked "found via review").
   enabled/clickable path live, for the same reason M8 step 5 stopped
   short of live-clicking Equip: the input-simulation risk to the
   developer's own session wasn't worth it given `allocate_stat_point`/
-  `learn_skill` are already directly unit-tested.
+  `learn_skill` are already directly unit-tested. Also affected by, and
+  fixed by, the `EguiPrimaryContextPass` schedule fix noted under step 5
+  above — this panel's buttons were subject to the exact same bug, just
+  not yet caught live here since none were enabled (0 points) to click.
 7. [x] Generic `Interactable` system (`game_core::interact`): proximity +
   action button (`E`, same key as pickup — checks interactables first,
   falls back to nearest item drop). **Corrected via review:** replicates

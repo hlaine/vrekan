@@ -1091,3 +1091,65 @@ fixed `1`-`3` keys, which needs none of this.
 design exist, revisit `Equipment`/`EquipSlot` for a second weapon slot and
 the hotbar/toggle input model then — don't add either speculatively
 before that prerequisite work happens.
+
+---
+
+## Found via live playtesting: `bevy_egui` 0.41 panels render but don't
+## accept clicks unless drawn from `EguiPrimaryContextPass` (M8 part 1)
+
+**Context:** The inventory and character panels (M8 steps 5-6) rendered
+correctly in every screenshot taken during this pass's own live
+playtests — HUD bars, item rows, stat/skill rows, buttons, all visually
+present and correctly bound to replicated data. But when the user tried
+the panels themselves: clicking "Equip" did nothing, the window's own
+close (X) button didn't close it, the collapse arrow didn't respond, and
+buttons never highlighted on hover. Only the window itself registered a
+generic "brought to front" click somewhere in its bounds — every specific
+widget was dead. `cargo build`/`clippy`/`fmt`/`test` were all clean
+throughout, and nothing in the client log indicated an error; this is a
+class of bug (rendering correct, real mouse interaction broken) that
+static checks and screenshot-based verification cannot catch, only
+driving the actual UI with a real pointer can.
+
+**Root cause, found by reading `bevy_egui` 0.41's own source and
+examples:** `hud_system`/`inventory_panel_system`/`character_panel_system`
+were registered in the plain `Update` schedule, calling
+`EguiContexts::ctx_mut()` and `egui::Window::show()` directly, matching
+how earlier `bevy_egui` versions (and countless other integrations) are
+normally used. But 0.41 introduced a dedicated `EguiPrimaryContextPass`
+schedule — confirmed by reading `bevy_egui-0.41.1/examples/simple.rs`,
+which registers its one UI system there rather than in `Update`, and by
+the crate's own doc comment: "If you add UI systems, make sure they go
+into the `EguiPrimaryContextPass` schedule - this will guarantee your
+plugin supports both the single-pass and multi-pass modes." Tracing
+`run_egui_context_pass_loop_system` (registered in `PostUpdate`'s
+`EguiPostUpdateSet::EndPass`) confirmed why: it runs
+`EguiPrimaryContextPass` *inside* `egui::Context::run_ui`'s closure — the
+exact begin-pass/end-pass window in which egui's `Context::input()` holds
+this frame's real pointer/keyboard state. A `.show()` call from anywhere
+outside that window (like plain `Update`) still queues paint output
+against the persistent `egui::Context` — hence correct rendering — but
+runs with no valid current-frame input state, so every widget's
+hover/click detection silently comes up empty. This is exactly why the
+symptom was "visible but inert" rather than a panic or a blank panel.
+
+**Decision:** Moved all three UI-drawing systems out of the `Update`
+tuple into their own `.add_systems(EguiPrimaryContextPass, (hud_system,
+inventory_panel_system, character_panel_system).chain())` call. Verified
+`EguiPrimaryContextPass` runs in `PostUpdate`, strictly after the entire
+`Update` schedule (including `init_replicated_players`, which sets
+`LocalPlayer`) — so this move needed no companion change to make
+`Res<LocalPlayer>`/replicated-component reads inside these systems see
+fresh per-frame state; ordering already worked in our favor. Confirmed
+live: the user re-tested immediately after and reported Equip now works.
+
+**Consequences:** Any *future* egui UI system (the forging panel, dialog
+panel, or anything else M8 steps 9-10 add) must be registered in
+`EguiPrimaryContextPass`, not `Update` — this is now the load-bearing
+convention going forward, not a one-off fix. If a UI system is ever added
+back into `Update` by mistake, expect this exact symptom (renders, but
+every widget is unclickable) and no compiler/clippy/test signal to catch
+it — only a live click-through will surface it. Screenshot-based
+verification (as used throughout this pass) is good for confirming
+layout/data-binding but cannot substitute for actually clicking a button
+with a real pointer at least once per new interactive panel.
