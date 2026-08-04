@@ -8,6 +8,7 @@ use bevy::camera::Projection;
 use bevy::gizmos::prelude::*;
 use bevy::prelude::*;
 use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
+use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
@@ -20,8 +21,8 @@ use content::{load_all_enemy_templates, EnemyTemplate};
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
-    DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Facing, Health, ItemDrop, Od,
-    SkillCooldowns, Stunned, LEASH_DISTANCE,
+    DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health,
+    Inventory, Item, ItemDrop, Od, SkillCooldowns, Stunned, LEASH_DISTANCE,
 };
 use protocol::{
     AttackInput, CastSkillInput, ConnectAuth, EquipItemInput, MoveInput, NetworkPlugin,
@@ -48,26 +49,23 @@ const SKILL_HOTKEYS: [(KeyCode, &str); 3] = [
 
 /// Picks up the nearest dropped item/rune in range — a deliberate button
 /// press, not automatic walk-over pickup (see `protocol::PickupItemInput`).
+/// Gated behind the input-focus guard (see `player_input_system`) — not
+/// one of `CLAUDE.md`'s explicitly-protected combat keys.
 const PICKUP_KEY: KeyCode = KeyCode::KeyE;
 
-/// Equips inventory slot 0/1/2 — same hotkey-stand-in-for-UI shape as
-/// `SKILL_HOTKEYS`, on function keys so they don't collide with the skill
-/// hotkeys above.
-const EQUIP_KEYS: [KeyCode; 3] = [KeyCode::F1, KeyCode::F2, KeyCode::F3];
-
-/// Unequips whatever's in each slot back to the inventory.
-const UNEQUIP_KEYS: [(KeyCode, EquipSlot); 3] = [
-    (KeyCode::F4, EquipSlot::Weapon),
-    (KeyCode::F5, EquipSlot::Armor),
-    (KeyCode::F6, EquipSlot::Helmet),
-];
+/// Opens/closes the inventory panel (`inventory_panel_system`) — replaces
+/// M7's `F1`-`F6` equip/unequip hotkey stand-ins, which are removed now
+/// that the panel exists (not kept alongside it, per `ROADMAP.md`).
+const INVENTORY_TOGGLE_KEY: KeyCode = KeyCode::KeyI;
 
 /// Sockets/unsockets a rune into the weapon's first socket — hardcoded to
 /// one slot/index and the two rune ids this pass's content actually has,
 /// purely to make the socket/unsocket mechanic reachable and testable
 /// without a real UI; the server-side resolution
 /// (`game_core::socket_rune`/`unsocket_rune`) already supports any
-/// slot/index/rune combination.
+/// slot/index/rune combination. Stays a hotkey (not a panel) until the
+/// forging UI (M8 step 10) exists — also gated behind the input-focus
+/// guard.
 const SOCKET_CRIT_SHARD_KEY: KeyCode = KeyCode::F7;
 const SOCKET_SWIFT_SHARD_KEY: KeyCode = KeyCode::F8;
 const UNSOCKET_KEY: KeyCode = KeyCode::F9;
@@ -134,6 +132,13 @@ struct LocalClientId(u64);
 #[derive(Resource, Default)]
 struct LocalPlayer(Option<Entity>);
 
+/// Whether the inventory panel (`inventory_panel_system`) is currently
+/// shown. Toggled by `INVENTORY_TOGGLE_KEY`; also flipped to `false` by
+/// egui's own window close button, since the panel is opened via
+/// `egui::Window::open(&mut ...)` on this same flag.
+#[derive(Resource, Default)]
+struct InventoryOpen(bool);
+
 /// Enemy templates loaded purely for appearance lookup (color/size) by
 /// `EnemyKind` — see `init_replicated_enemies`. Simulation-relevant fields
 /// (health, damage, AI ranges) only matter server-side now.
@@ -167,6 +172,7 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
+        .init_resource::<InventoryOpen>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
@@ -181,6 +187,7 @@ fn main() {
                 player_appearance_system,
                 facing_indicator_system,
                 hud_system,
+                inventory_panel_system,
             )
                 .chain(),
         )
@@ -357,14 +364,14 @@ fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
 #[allow(clippy::too_many_arguments)] // one MessageWriter per input type, inherent to this system's job
 fn player_input_system(
     keyboard: Res<ButtonInput<KeyCode>>,
+    egui_wants_input: Res<EguiWantsInput>,
     local_player: Res<LocalPlayer>,
+    mut inventory_open: ResMut<InventoryOpen>,
     mut move_input: MessageWriter<MoveInput>,
     mut attack_input: MessageWriter<AttackInput>,
     mut revive_input: MessageWriter<ReviveInput>,
     mut cast_skill_input: MessageWriter<CastSkillInput>,
     mut pickup_input: MessageWriter<PickupItemInput>,
-    mut equip_input: MessageWriter<EquipItemInput>,
-    mut unequip_input: MessageWriter<UnequipItemInput>,
     mut socket_rune_input: MessageWriter<SocketRuneInput>,
     mut unsocket_rune_input: MessageWriter<UnsocketRuneInput>,
 ) {
@@ -408,22 +415,27 @@ fn player_input_system(
         held: keyboard.pressed(KeyCode::KeyF),
     });
 
+    // Input-focus guard (M8 step 4): WASD/Space/F(revive)/1-3 above are
+    // never gated, per CLAUDE.md — a menu is an overlay, not a pause, and
+    // combat/movement must keep working while one's open. Everything
+    // below is a non-protected hotkey, gated on real egui keyboard focus
+    // (a `TextEdit`-style widget, not just the mouse hovering a panel —
+    // hover alone would make `INVENTORY_TOGGLE_KEY` unable to close the
+    // very panel the cursor happens to be resting on) so a panel click
+    // can't also register as one of these actions. This panel has no
+    // text field yet, so `wants_keyboard_input()` is always false today —
+    // the guard is real, correctly-wired infrastructure with no
+    // observable effect until a future panel adds one.
+    if egui_wants_input.wants_keyboard_input() {
+        return;
+    }
+
+    if keyboard.just_pressed(INVENTORY_TOGGLE_KEY) {
+        inventory_open.0 = !inventory_open.0;
+    }
+
     if keyboard.just_pressed(PICKUP_KEY) {
         pickup_input.write(PickupItemInput);
-    }
-
-    for (index, key) in EQUIP_KEYS.into_iter().enumerate() {
-        if keyboard.just_pressed(key) {
-            equip_input.write(EquipItemInput {
-                inventory_index: index,
-            });
-        }
-    }
-
-    for (key, slot) in UNEQUIP_KEYS {
-        if keyboard.just_pressed(key) {
-            unequip_input.write(UnequipItemInput { slot });
-        }
     }
 
     if keyboard.just_pressed(SOCKET_CRIT_SHARD_KEY) {
@@ -587,9 +599,9 @@ type LocalPlayerHud<'w, 's> = Query<
 /// indicator. Skill rows use the existing fixed `1`-`3` hotkeys from M6
 /// (`SKILL_HOTKEYS`) rather than `KnownSkills` — the skill-tree UI that
 /// would ever populate `KnownSkills` with something other than "empty"
-/// doesn't exist yet (see ROADMAP.md's M8 step 6). First panel — nothing
-/// here is clickable, so no input-focus guard yet (that lands alongside
-/// the first interactive panel, ROADMAP.md's M8 step 4).
+/// doesn't exist yet (see ROADMAP.md's M8 step 6). Nothing here is
+/// clickable, so it doesn't need the input-focus guard `player_input_system`
+/// applies for `inventory_panel_system` below.
 fn hud_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, query: LocalPlayerHud) {
     let Some(entity) = local_player.0 else {
         return;
@@ -635,4 +647,95 @@ fn hud_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, query:
                 ui.label(label);
             }
         });
+}
+
+/// One row per socket: "filled" (by rune id) or "empty" — sockets aren't
+/// named individually anywhere else in the UI, so this is purely a
+/// display convenience for the panel below.
+fn socket_summary(item: &Item) -> String {
+    let filled = item.sockets.iter().filter(|s| s.is_some()).count();
+    format!(
+        "{} ({filled}/{} sockets)",
+        item.template_key,
+        item.sockets.len()
+    )
+}
+
+/// Click-driven inventory + equip/unequip panel — replaces M7's `F1`-`F6`
+/// hotkey stand-ins (see `INVENTORY_TOGGLE_KEY`'s doc comment). Toggled by
+/// `INVENTORY_TOGGLE_KEY`, and by egui's own window close button via the
+/// shared `InventoryOpen` flag passed to `egui::Window::open`. Displays
+/// items by their raw `template_key` (e.g. `"rusty_sword"`) — `ItemTemplate`
+/// has no separate display-name field yet, same placeholder-text treatment
+/// as the HUD's skill rows.
+fn inventory_panel_system(
+    mut contexts: EguiContexts,
+    local_player: Res<LocalPlayer>,
+    mut inventory_open: ResMut<InventoryOpen>,
+    query: Query<(&Inventory, &Equipment)>,
+    mut equip_input: MessageWriter<EquipItemInput>,
+    mut unequip_input: MessageWriter<UnequipItemInput>,
+) {
+    if !inventory_open.0 {
+        return;
+    }
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok((inventory, equipment)) = query.get(entity) else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut equip_clicked = None;
+    let mut unequip_clicked = None;
+
+    egui::Window::new("Inventory")
+        .open(&mut inventory_open.0)
+        .show(ctx, |ui| {
+            ui.heading("Equipped");
+            for (label, slot, item) in [
+                ("Weapon", EquipSlot::Weapon, &equipment.weapon),
+                ("Armor", EquipSlot::Armor, &equipment.armor),
+                ("Helmet", EquipSlot::Helmet, &equipment.helmet),
+            ] {
+                ui.horizontal(|ui| match item {
+                    Some(item) => {
+                        ui.label(format!("{label}: {}", socket_summary(item)));
+                        if ui.button("Unequip").clicked() {
+                            unequip_clicked = Some(slot);
+                        }
+                    }
+                    None => {
+                        ui.label(format!("{label}: (empty)"));
+                    }
+                });
+            }
+
+            ui.separator();
+            ui.heading("Inventory");
+            if inventory.0.is_empty() {
+                ui.label("(empty)");
+            }
+            for (index, item) in inventory.0.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(socket_summary(item));
+                    if ui.button("Equip").clicked() {
+                        equip_clicked = Some(index);
+                    }
+                });
+            }
+        });
+
+    // Deferred until after `show` closes: the closure above borrows `ui`
+    // (and transitively `ctx`) mutably, and `MessageWriter::write` doesn't
+    // need to happen inside it.
+    if let Some(inventory_index) = equip_clicked {
+        equip_input.write(EquipItemInput { inventory_index });
+    }
+    if let Some(slot) = unequip_clicked {
+        unequip_input.write(UnequipItemInput { slot });
+    }
 }

@@ -290,14 +290,39 @@ starting found two gaps folded in below (marked "found via review").
   one-line `if downed`, the same `Has<Downed>` pattern already proven
   live elsewhere in `client` (`player_appearance_system`), not new
   logic of its own.
-4. [ ] Input-focus guard (an `egui` pointer/keyboard-capture check —
-  exact `bevy_egui` 0.41 method names to confirm during implementation),
-  added alongside the first *interactive* panel next. Per `CLAUDE.md`,
-  opening a panel never suppresses `WASD`/`Space`/`F`/`1`-`3` — it only
-  stops a panel click from also being read as game input.
-5. [ ] Inventory + equip/unequip panel — click-driven, replaces M7's
-  `F1`-`F6` hotkey stand-ins (removed once the panel exists, not kept
-  alongside it)
+4. [x] Input-focus guard, built alongside step 5's panel below.
+  `bevy_egui` 0.41's `EguiPlugin` already runs `write_egui_wants_input_system`
+  by default, populating `Res<bevy_egui::input::EguiWantsInput>` every
+  frame with no extra setup — confirmed by reading the crate source, not
+  assumed. `player_input_system` reads `wants_keyboard_input()` (real
+  `TextEdit`-style focus, not just the mouse hovering a panel — hovering
+  alone would make the toggle key unable to close the very panel the
+  cursor is resting on) and gates every hotkey below the check on it.
+  `WASD`/`Space`/`F`(revive)/`1`-`3` stay above the check, never gated,
+  per `CLAUDE.md`. The panel below has no text field, so this guard has
+  no observable effect yet — correctly-wired infrastructure for when one
+  exists, not a behavior change today.
+5. [x] Inventory + equip/unequip panel — click-driven, replaces M7's
+  `F1`-`F6` hotkey stand-ins (removed, not kept alongside it).
+  `INVENTORY_TOGGLE_KEY` (`I`) opens/closes an egui window (also
+  closable via its own close button, both driving the same
+  `InventoryOpen` flag) listing equipped slots (with an Unequip button
+  per occupied slot) and inventory items (with an Equip button each),
+  sending the same `EquipItemInput`/`UnequipItemInput` messages the old
+  hotkeys sent — server-side resolution (`apply_equip_input`/
+  `apply_unequip_input`) is unchanged. Items display by raw
+  `template_key` (e.g. `"rusty_sword"`); `ItemTemplate` has no display-
+  name field yet. Confirmed live: a server+client playtest showed the
+  toggle opening/closing the panel, the empty-inventory/equipment state
+  rendering correctly, and WASD movement plus combat continuing to work
+  normally while the panel stayed open (proving the guard doesn't
+  suppress the protected keys). Didn't get a live click-through of the
+  Equip button itself (simulating mouse/keyboard input to drive the
+  external game window twice caused the *host* terminal to lose/regain
+  focus unexpectedly, once nearly disrupting the developer's own
+  session) — that path leans entirely on `game_core::item::equip_item`'s
+  existing unit tests plus the unchanged server handlers, since the only
+  new code is which client input triggers the same message.
 6. [ ] Level-up / stat-allocation panel (new `AllocateStatPointInput`
   message — `UnspentStatPoints` has had nowhere to go since M5) and a
   skill-learning panel (new `LearnSkillInput` message — same gap for
