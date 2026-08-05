@@ -564,17 +564,48 @@ found two gaps folded in below (marked "found via review").
   unconditional Startup spawn would otherwise pile up duplicate loot on
   every server restart of an already-running game.
 
-Deferred (see `DECISIONS.md` for why — blocked on weapon-driven combat
-stats not existing yet, not a UI-only gap):
+Deferred (see `DECISIONS.md` for why):
 - [ ] `TAB`-style toggle-through skill/attack selector, dedicated
-  per-attack hotkeys, primary/secondary weapon slots
-- [ ] Vendor/shop UI (blocked on M7 part 2's vendor economy, which
-  doesn't exist yet)
+  per-attack hotkeys, primary/secondary weapon slots — blocked on
+  weapon-driven combat stats not existing yet, not a UI-only gap.
 - [ ] Player skin preset selection; equipped armor/helmet renders visually
   (full per-item outfit changes — see `MECHANICS.md`). Blocked on actual
   art assets, not just code — everything's solid-color placeholder
   sprites today.
-- [ ] Minimap, full party status detail
+
+Minimap and full party status detail are not blocked on anything — see
+M8.5 below, which builds them alongside the lighting/ambience foundation.
+
+## M8.5 — Lighting & ambience foundation
+
+A prerequisite for real art (maps, tiles, character sprites): lighting and
+ambience effects need to exist and be tunable *before* colors get chosen
+for actual sprites, not guessed at blind. Also closes the one real
+still-unbuilt M8 UI gap (minimap, party status) while here. Everything in
+this milestone is client-only rendering/presentation — no `game_core`/
+`server`/`protocol` changes, per `CLAUDE.md`'s crate boundaries (lights and
+particles have no gameplay effect to authorize or keep in sync).
+
+- [x] Minimap + full party status detail — HP/Od bars and downed/stunned
+  indicators for every party member (local + remote), plus a small
+  `egui::Painter` minimap plotting positions against the map's known fixed
+  extent. All the underlying data (`Health`/`Od`/`Downed`/`Stunned`) is
+  already replicated; no new protocol work — new `PartyStatus` query type
+  (kept separate from `PartyPositions` since `party_centroid_and_spread`
+  assumes that one yields a bare `&Position`), `party_status_system` and
+  `minimap_system`. Confirmed live: minimap dot and HP/Od bars render and
+  track a moving player.
+- [ ] `bevy_lit` added (client-only) for 2D dynamic lighting: ambient
+  light, point lights, shadow-casting occluders.
+- [ ] Status indicators (downed/stunned/leash-warning) redesigned off
+  `Sprite.color` onto a gizmo overlay, so the base sprite color is free
+  for the lighting system (and later, real textures) to own.
+- [ ] `bevy_hanabi` added (client-only) for GPU particle effects: sparks/
+  glow at torches, placed via a new Tiled object layer, read purely
+  client-side (no server involvement — cosmetic only).
+- [ ] A lighting/ambience debug panel: sliders for ambient and point-light
+  color/intensity/radius — the actual sandbox for picking sprite/tile
+  colors against real lighting before any art exists.
 
 ## M9 — Objectives & first dungeon content
 - [ ] Hand-authored dungeon instance, entered explicitly from the overworld

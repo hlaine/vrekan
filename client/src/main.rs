@@ -116,6 +116,22 @@ const MAP_PATH: &str = "maps/valley.tmx";
 const MIN_ZOOM: f32 = 0.7;
 const MAX_ZOOM: f32 = 1.6;
 
+// World-space extent of the current map (20x15 tiles at 32px/tile — see
+// assets/maps/valley.tmx). World x runs [0, MAP_WORLD_WIDTH]; world y runs
+// [-MAP_WORLD_HEIGHT, 0] (`TilemapAnchor::TopLeft` puts the origin at the
+// map's top-left corner, and the established Tiled coordinate convention
+// negates y — see server's spawn_interactables doc comment). Used only to
+// scale the minimap; if the map ever grows, this needs updating alongside
+// it since there's no dynamic map-bounds query today.
+const MAP_WORLD_WIDTH: f32 = 640.0;
+const MAP_WORLD_HEIGHT: f32 = 480.0;
+const MINIMAP_SIZE: f32 = 120.0;
+// Mirror PLAYER_COLOR/REMOTE_PLAYER_COLOR's RGB values as egui::Color32 —
+// no existing bevy::Color-to-egui::Color32 conversion helper, and these
+// are placeholder dots, not worth adding one for.
+const MINIMAP_PLAYER_COLOR: egui::Color32 = egui::Color32::from_rgb(51, 179, 77);
+const MINIMAP_REMOTE_COLOR: egui::Color32 = egui::Color32::from_rgb(77, 128, 204);
+
 // Fraction of the leash radius (LEASH_DISTANCE / 2) at which the local
 // player's leash-limit indicator kicks in.
 const LEASH_WARNING_RATIO: f32 = 0.9;
@@ -309,6 +325,8 @@ fn main() {
             EguiPrimaryContextPass,
             (
                 hud_system,
+                party_status_system,
+                minimap_system,
                 inventory_panel_system,
                 character_panel_system,
                 dialog_panel_system,
@@ -615,6 +633,24 @@ fn sync_transform_system(mut query: Query<(&Position, &mut Transform)>) {
 type PartyPositions<'w, 's> =
     Query<'w, 's, &'static Position, Or<(With<Player>, With<RemotePlayer>)>>;
 
+/// Same party membership as `PartyPositions`, extended with the fields the
+/// M8.5 party-status panel/minimap need — kept as a separate type rather
+/// than widening `PartyPositions` itself, since `party_centroid_and_spread`
+/// below assumes that query yields a bare `&Position` per match.
+type PartyStatus<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Position,
+        &'static Health,
+        Option<&'static Od>,
+        Has<Downed>,
+        Has<Stunned>,
+    ),
+    Or<(With<Player>, With<RemotePlayer>)>,
+>;
+
 /// Returns the party's centroid and the greatest distance from it to any
 /// party member, or `None` if no party member positions exist yet. Shared by
 /// the camera and leash-indicator systems so they don't each recompute it.
@@ -791,6 +827,88 @@ fn hud_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, query:
                     format!("{}: {skill_id} ready", index + 1)
                 };
                 ui.label(label);
+            }
+        });
+}
+
+/// Lists every party member's (local + remote) HP/Od bars and downed/
+/// stunned status — the M8 gap `ROADMAP.md` flagged as unblocked but
+/// unbuilt (M8.5). All fields are already replicated
+/// (`Health`/`Od`/`Downed`/`Stunned`), so this needs no new protocol work,
+/// just a wider query than any single-panel system used before. Nothing
+/// here is clickable, so (like `hud_system`) it doesn't need the
+/// input-focus guard.
+fn party_status_system(
+    mut contexts: EguiContexts,
+    local_player: Res<LocalPlayer>,
+    party: PartyStatus,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    egui::Window::new("Party")
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+        .resizable(false)
+        .show(ctx, |ui| {
+            for (entity, _, health, od, downed, stunned) in &party {
+                let label = if Some(entity) == local_player.0 {
+                    "You"
+                } else {
+                    "Ally"
+                };
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    ui.add(
+                        egui::ProgressBar::new(health.current / health.max)
+                            .text(format!("HP {:.0}/{:.0}", health.current, health.max)),
+                    );
+                    if let Some(od) = od {
+                        ui.add(
+                            egui::ProgressBar::new(od.current / od.max)
+                                .text(format!("Od {:.0}/{:.0}", od.current, od.max)),
+                        );
+                    }
+                    if downed {
+                        ui.colored_label(egui::Color32::RED, "DOWNED");
+                    } else if stunned {
+                        ui.colored_label(egui::Color32::YELLOW, "STUNNED");
+                    }
+                });
+            }
+        });
+}
+
+/// Small fixed-size minimap plotting every party member's position against
+/// the map's known fixed extent (`MAP_WORLD_WIDTH`/`MAP_WORLD_HEIGHT`) —
+/// placeholder colored dots, not real terrain art; that's the whole point
+/// of M8.5, getting lighting/ambience tunable before any real art exists.
+fn minimap_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, party: PartyStatus) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    egui::Window::new("minimap")
+        .title_bar(false)
+        .resizable(false)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(10.0, -10.0))
+        .show(ctx, |ui| {
+            let (response, painter) =
+                ui.allocate_painter(egui::vec2(MINIMAP_SIZE, MINIMAP_SIZE), egui::Sense::hover());
+            let rect = response.rect;
+            painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(180));
+
+            for (entity, position, _, _, _, _) in &party {
+                let normalized_x = (position.x / MAP_WORLD_WIDTH).clamp(0.0, 1.0);
+                let normalized_y = (-position.y / MAP_WORLD_HEIGHT).clamp(0.0, 1.0);
+                let point =
+                    rect.min + egui::vec2(normalized_x * MINIMAP_SIZE, normalized_y * MINIMAP_SIZE);
+                let color = if Some(entity) == local_player.0 {
+                    MINIMAP_PLAYER_COLOR
+                } else {
+                    MINIMAP_REMOTE_COLOR
+                };
+                painter.circle_filled(point, 3.0, color);
             }
         });
 }
