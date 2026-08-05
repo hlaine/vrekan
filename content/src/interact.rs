@@ -68,6 +68,12 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn real_interactable_templates_load_successfully() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/interactables");
+        load_all_interactable_templates(&dir).unwrap();
+    }
+
+    #[test]
     fn parses_a_minimal_template_with_all_optional_fields_omitted() {
         let template = parse_interactable_template("(range: 60.0)").unwrap();
 

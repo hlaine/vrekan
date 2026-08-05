@@ -1,0 +1,19 @@
+(
+    range: 60.0,
+    dialog: Some("The rune hums, and warmth spreads through your limbs."),
+    // `applies_to` is required by the shared EffectTemplate schema but
+    // unused for interactables — game_core::interact_or_pickup_system
+    // applies this unconditionally to the interacting player, there's no
+    // "attacker" side to route between (see DECISIONS.md's M8 planning
+    // entry).
+    effect: Some((
+        id: "runestone_blessing",
+        kind: StatModifier(stat: CritChance),
+        duration: 30.0,
+        magnitude: 0.05,
+        stack_mode: RefreshDuration,
+        applies_to: Attacker,
+        chance: 1.0,
+    )),
+    opens_panel: None,
+)

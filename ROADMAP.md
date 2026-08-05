@@ -396,7 +396,7 @@ starting found two gaps folded in below (marked "found via review").
   nearly polluting a live prompt) made further automated play-testing not
   worth the risk. The exact resolution logic this would have exercised
   is what the 6 unit tests above directly cover.
-8. [ ] Interactables (blacksmith, runestones) placed via a new Tiled
+8. [x] Interactables (blacksmith, runestones) placed via a new Tiled
   object layer in `assets/maps/valley.tmx` (named point objects, read
   the same way `spawn_map_colliders` already reads the collision layer)
   — the map is the source of truth for placement, not a hardcoded spawn
@@ -406,6 +406,31 @@ starting found two gaps folded in below (marked "found via review").
   already excludes them from every combat-targeting query (`ai_system`
   only ever targets `With<Player>`; melee/skill targeting requires
   `With<Health>`).
+  `server::spawn_interactables` (new Startup system) reads the
+  "interactables" object layer's named `Point` objects, matches each
+  name against a `content::InteractableTemplate` key, and spawns
+  `Interactable { template_key, range }` — loading templates directly
+  (mirroring `spawn_enemies`) rather than via `Res<InteractableLibrary>`,
+  since `range` is spawn-time-only data (see that resource's doc
+  comment). A name with no matching template panics at Startup, same
+  "fail loudly" convention as `spawn_enemies`. Two real content files now
+  exist and are placed: `runestone` (a `CritChance` `StatModifier` buff)
+  and `blacksmith` (no effect, `opens_panel: Some("forging")` — inert
+  until step 10). Client renders both with a placeholder blue-violet
+  square (`init_replicated_interactables`), same "render, don't
+  simulate" split as enemies. **Found via live testing, not assumed:**
+  `ObjectShape::Point`'s tuple fields are deprecated in `tiled` `0.16.0`
+  (superseded by the object's own `x`/`y`) — matching `Point(..)` instead
+  of `Point(x, y)` avoids a clippy `-D warnings` failure that would
+  otherwise block the build. Confirmed live end-to-end with temporary
+  debug logging (removed before commit): walking up to the blacksmith
+  correctly found it as nearest and correctly applied no effect; walking
+  to the runestone correctly found *it* as nearest instead and logged
+  `applying effect "runestone_blessing"`. The user's first two attempts
+  read as "E does nothing" — both were actually correct behavior (too
+  far from either object, then standing at the effect-less blacksmith)
+  rather than a bug; only found the *actual* correct interpretation by
+  adding temporary instrumentation rather than guessing further.
 9. [ ] Dialog panel (generic text window) for runestone-style
   interactions — the simpler of the two interaction outcomes, built
   first to validate the whole `Interactable` pipeline end-to-end before

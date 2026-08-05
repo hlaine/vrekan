@@ -24,8 +24,8 @@ use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
     xp_required, DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing,
-    Health, Inventory, Item, ItemDrop, KnownSkills, Level, Od, SkillCooldowns, Stat, Stats,
-    Stunned, UnspentSkillPoints, UnspentStatPoints, LEASH_DISTANCE,
+    Health, Interactable, Inventory, Item, ItemDrop, KnownSkills, Level, Od, SkillCooldowns, Stat,
+    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, LEASH_DISTANCE,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -38,6 +38,13 @@ const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
 const ITEM_DROP_COLOR: Color = Color::srgb(0.9, 0.8, 0.2);
 const RUNE_DROP_COLOR: Color = Color::srgb(0.6, 0.2, 0.9);
 const DROP_SPRITE_SIZE: f32 = 16.0;
+
+// Placeholder appearance for a replicated `Interactable` (blacksmith,
+// runestone) — a distinct blue-violet square, not real art. Larger than a
+// dropped item/rune's sprite since these are meant to read as world
+// fixtures (NPCs, objects), not loose pickups.
+const INTERACTABLE_COLOR: Color = Color::srgb(0.4, 0.4, 0.9);
+const INTERACTABLE_SPRITE_SIZE: f32 = 24.0;
 
 /// Fixed hotkey-to-skill-id mapping — a stand-in for the real skill-tree
 /// UI (M8), not a protocol concept: `CastSkillInput` carries the skill's
@@ -213,6 +220,7 @@ fn main() {
                 init_replicated_players,
                 init_replicated_enemies,
                 init_replicated_item_drops,
+                init_replicated_interactables,
                 player_input_system,
                 sync_transform_system,
                 party_camera_system,
@@ -400,6 +408,24 @@ fn init_replicated_item_drops(
         };
         commands.entity(entity).insert((
             Sprite::from_color(color, Vec2::splat(DROP_SPRITE_SIZE)),
+            Transform::default(),
+        ));
+    }
+}
+
+/// Reacts to newly-replicated `Interactable`s (spawned server-side from the
+/// map's "interactables" object layer — see `server`'s
+/// `spawn_interactables`). Purely a placeholder visual until M8 step 9's
+/// dialog panel and step 10's forging UI give these a reason to look
+/// distinct per template — same "render, don't simulate" split as
+/// `init_replicated_enemies`.
+fn init_replicated_interactables(
+    mut commands: Commands,
+    new_interactables: Query<Entity, Added<Interactable>>,
+) {
+    for entity in &new_interactables {
+        commands.entity(entity).insert((
+            Sprite::from_color(INTERACTABLE_COLOR, Vec2::splat(INTERACTABLE_SPRITE_SIZE)),
             Transform::default(),
         ));
     }

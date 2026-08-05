@@ -35,10 +35,10 @@ use game_core::{
     learn_skill, reset_xp_on_full_wipe, revive_system, skill_cast_system, socket_rune,
     tick_od_regen, tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune,
     ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy,
-    Equipment, Facing, InteractOrPickupRequested, InteractableLibrary, Inventory, ItemDrop,
-    ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving, RuneInventory,
-    RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned,
-    UnspentSkillPoints, UnspentStatPoints, Velocity,
+    Equipment, Facing, InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory,
+    ItemDrop, ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving,
+    RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat,
+    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -161,6 +161,7 @@ fn main() {
                 setup,
                 spawn_map_colliders,
                 spawn_enemies,
+                spawn_interactables,
             ),
         )
         .add_systems(
@@ -734,6 +735,60 @@ fn spawn_map_colliders(mut commands: Commands) {
                 continue;
             };
             commands.spawn((RigidBody::Static, collider));
+        }
+    }
+}
+
+/// Loads the map's "interactables" object layer and spawns an `Interactable`
+/// per named point object, matching each name against a
+/// `content::InteractableTemplate` key — same convention as `EnemyKind`
+/// (see `DECISIONS.md`'s M8 planning entry). Loads templates directly
+/// (mirroring `spawn_enemies`) rather than via `Res<InteractableLibrary>`:
+/// `range` is spawn-time data baked straight into the replicated
+/// `Interactable` component, not something looked up again at interaction
+/// time (see that resource's doc comment). A named object with no matching
+/// template panics here, at Startup before anyone's connected — same
+/// "malformed content fails loudly" convention as `spawn_enemies`, since a
+/// silent no-op would read as "nothing spawned there" rather than "there's
+/// a typo somewhere."
+fn spawn_interactables(mut commands: Commands) {
+    let templates = load_all_interactable_templates(Path::new(INTERACTABLE_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load interactable templates: {error}"));
+
+    let mut loader = tiled::Loader::new();
+    let map = loader
+        .load_tmx_map(Path::new(MAP_PATH))
+        .unwrap_or_else(|error| panic!("failed to load map {MAP_PATH}: {error}"));
+
+    for layer in map.layers() {
+        if layer.name != "interactables" {
+            continue;
+        }
+        let tiled::LayerType::Objects(object_layer) = layer.layer_type() else {
+            continue;
+        };
+        for object in object_layer.objects() {
+            let tiled::ObjectShape::Point(..) = &object.shape else {
+                continue;
+            };
+            let template_key = object.name.clone();
+            let Some((_, template)) = templates.iter().find(|(key, _)| *key == template_key) else {
+                panic!(
+                    "interactable object {template_key:?} in {MAP_PATH} has no matching \
+                     template in {INTERACTABLE_TEMPLATES_DIR}"
+                );
+            };
+            commands.spawn((
+                Replicated,
+                Position {
+                    x: object.x,
+                    y: -object.y,
+                },
+                Interactable {
+                    template_key,
+                    range: template.range,
+                },
+            ));
         }
     }
 }
