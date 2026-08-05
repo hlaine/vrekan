@@ -232,7 +232,13 @@ Claude Code tasks as you start it, not all upfront.
   (see `game_core::roll_loot`).
 - [ ] Vendor buy/sell economy, individual currency per player — see
   `MECHANICS.md`. Deferred to a part 2 pass: `MECHANICS.md` itself calls
-  this "a distinct system" from the loot/forging pipeline above.
+  this "a distinct system" from the loot/forging pipeline above. Currency
+  is built once here and shared by both vendors and forging cost (see
+  `DECISIONS.md`'s M7 part 2 planning entry): a currency drop is another
+  weighted `LootTable`/`LootEntry` entry, not a separate guaranteed-per-
+  kill mechanism. Socketing (M7 part 1's `socket_rune`) will gain a
+  currency cost; unsocketing stays free/reversible as shipped. Exact
+  amounts/scaling deliberately not decided yet.
 - [ ] Enemy visual-variant data shape (shared base template + swappable
   sprite field) — see `MECHANICS.md`. Deferred to the same part 2 pass;
   unrelated to forging, just filed under the same milestone.

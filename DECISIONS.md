@@ -1153,3 +1153,36 @@ it — only a live click-through will surface it. Screenshot-based
 verification (as used throughout this pass) is good for confirming
 layout/data-binding but cannot substitute for actually clicking a button
 with a real pointer at least once per new interactive panel.
+
+---
+
+## M7 part 2 planning: currency built once, shared by both vendor economy and forging cost
+
+**Context:** With M8 part 1 (forging UI) shipped, the user asked about
+adding a forging cost and a coins/reward system. Currency was already
+scoped as part of M7 part 2's deferred vendor economy (`MECHANICS.md`'s
+Economy section; individual per player, not shared/pooled). Rather than
+bolt a forging-only currency field on now and rework it once vendors
+land, confirmed with the user to build currency once as shared M7 part 2
+groundwork, with vendor buy/sell and forging cost both layered on top of
+it.
+
+**Decision — currency is another weighted `LootTable`/`LootEntry` drop,
+not a guaranteed per-kill grant.** Consistent with how item/rune drops
+already work (`game_core::roll_loot`, M7 part 1) — a content author tunes
+drop odds the same way for currency as for anything else, rather than a
+second, differently-shaped reward mechanism living alongside the existing
+loot roll.
+
+**Decision — socketing costs currency, unsocketing stays free.** This
+reverses the passing guess in M7 part 1's entry above (which floated
+unsocketing as the eventual currency sink); confirmed instead that
+*socketing* is the cost point, unsocketing remains the already-shipped
+free/reversible action. Amounts, scaling (flat vs. per-rune-tier), and
+whether it varies by socket/item are explicitly deferred — "dive deeper
+into the socketing stuff later," not decided yet.
+
+**Not yet decided (deferred to a follow-up conversation):** the concrete
+currency amount for socketing, vendor price shape/content schema, and
+whether currency needs its own HUD display before or alongside the vendor
+UI.
