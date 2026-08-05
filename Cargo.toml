@@ -41,3 +41,8 @@ rand = "=0.10.2"
 # Client-only: HUD/menu UI (CLAUDE.md's stack from the start). The server
 # must never link it — no rendering dependencies on the headless binary.
 bevy_egui = "=0.41.1"
+# Client-only: 2D dynamic lighting/shadows (M8.5), needed before real art
+# lands so sprite/tile colors can be chosen against real lighting. The
+# server must never link it — purely cosmetic, no gameplay effect to
+# authorize or keep in sync.
+bevy_lit = "=0.11.0"

@@ -597,6 +597,20 @@ particles have no gameplay effect to authorize or keep in sync).
   track a moving player.
 - [ ] `bevy_lit` added (client-only) for 2D dynamic lighting: ambient
   light, point lights, shadow-casting occluders.
+  - [x] `bevy_lit` `=0.11.0` added to `client` only (verified the exact
+    resolvable version via `cargo add --dry-run` rather than trusting
+    research alone; `cargo tree -p server` confirmed no `bevy_lit`/
+    `bevy_render` growth on the server). `Lighting2dPlugin` wired,
+    `Lighting2dSettings`/`AmbientLight2d` (both defaults) attached to the
+    `Camera2d`. One `PointLight2d` placed at the player's spawn point as a
+    deliberate cheap smoke test for the untested `bevy_lit`+`bevy_egui`
+    combination, before investing further. **Confirmed live**: scene
+    renders correctly with a visible glow, and — the actual point of the
+    test — every egui panel stayed fully clickable (Equip, character
+    panel, Party window all clicked with the light active), not just
+    visible. This is the same class of bug M8's `EguiPrimaryContextPass`
+    issue was; a screenshot alone would not have caught a regression here.
+  - [ ] Shadow-casting occluders not added yet (next step).
 - [ ] Status indicators (downed/stunned/leash-warning) redesigned off
   `Sprite.color` onto a gizmo overlay, so the base sprite color is free
   for the lighting system (and later, real textures) to own.

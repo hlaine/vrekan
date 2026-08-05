@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
 use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use bevy_lit::prelude::*;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::{
@@ -288,6 +289,7 @@ fn main() {
         .add_plugins(NetworkPlugin)
         .add_plugins(TiledPlugin::default())
         .add_plugins(EguiPlugin::default())
+        .add_plugins(Lighting2dPlugin)
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
         .init_resource::<InventoryOpen>()
@@ -339,7 +341,36 @@ fn main() {
 }
 
 fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn(Camera2d);
+    // Lighting2dSettings/AmbientLight2d are read by bevy_lit's Lighting2dPlugin —
+    // M8.5's lighting foundation, added so sprite/tile colors can be chosen
+    // against real lighting before any real art exists. Defaults for both
+    // (full-white ambient, no blur/edge tuning) are a deliberate starting
+    // point for the regression check this step is: confirm the existing
+    // scene still renders correctly with the plugin active, before tuning
+    // anything (that's the debug panel's job, M8.5 step 13).
+    commands.spawn((
+        Camera2d,
+        Lighting2dSettings::default(),
+        AmbientLight2d::default(),
+    ));
+
+    // First real light, placed near the player's spawn point (see server's
+    // on_client_connected: Position { x: 0.0, y: 0.0 }) — a deliberate cheap
+    // smoke test for the untested bevy_lit + bevy_egui combination (M8.5
+    // step 6) before investing further in occluders/particles/torches.
+    // PointLight2d requires Transform/Visibility (auto-added via Bevy's
+    // required-components), so a bare Transform here is enough to position it.
+    commands.spawn((
+        PointLight2d {
+            color: Color::srgb(1.0, 0.9, 0.7),
+            intensity: 2.0,
+            inner_radius: 20.0,
+            outer_radius: 200.0,
+            falloff: 3.0,
+            cast_shadows: false,
+        },
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
 
     commands.spawn((
         TiledMap(asset_server.load(MAP_PATH)),

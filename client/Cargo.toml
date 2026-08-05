@@ -8,6 +8,7 @@ license.workspace = true
 bevy = { workspace = true }
 bevy_ecs_tiled = { workspace = true, features = ["render", "png", "text"] }
 bevy_egui = { workspace = true }
+bevy_lit = { workspace = true }
 bevy_replicon = { workspace = true }
 bevy_replicon_renet = { workspace = true }
 content = { path = "../content" }
