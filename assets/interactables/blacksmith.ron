@@ -2,5 +2,5 @@
     range: 60.0,
     dialog: Some("The blacksmith looks up from the forge and nods toward their tools."),
     effect: None,
-    opens_panel: Some("forging"),
+    opens_panels: ["forging", "vendor"],
 )

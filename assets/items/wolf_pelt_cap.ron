@@ -1,4 +1,5 @@
 (
     slot: Helmet,
     socket_count: 1,
+    sell_value: 12,
 )

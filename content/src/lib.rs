@@ -1,8 +1,13 @@
+pub mod economy;
 pub mod enemy;
 pub mod interact;
 pub mod item;
 pub mod skill;
 
+pub use economy::{
+    load_all_vendor_templates, load_vendor_template, parse_vendor_template, VendorListingTemplate,
+    VendorTemplate,
+};
 pub use enemy::{
     load_all_enemy_templates, load_enemy_template, parse_enemy_template, spawn_enemy,
     EnemyTemplate, LootEntryTemplate, LootKindTemplate,

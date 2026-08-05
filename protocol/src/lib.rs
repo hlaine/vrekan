@@ -122,6 +122,28 @@ pub struct LearnSkillInput {
     pub skill_id: String,
 }
 
+/// Sent by the M7 part 2 vendor panel's Buy button — buys
+/// `listing_index` from the nearest vendor-kind `Interactable`'s stock via
+/// `game_core::buy_item`. Doesn't carry *which* vendor: the server
+/// re-resolves the nearest one from the actor's own position (see
+/// `game_core::nearest_interactable_with_panel`), never trusting a
+/// client-claimed target — same pattern `SocketRuneInput`'s forging-panel
+/// proximity check already uses.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuyItemInput {
+    pub listing_index: usize,
+}
+
+/// Sent by the vendor panel's Sell button (after the client's own confirm
+/// step — see `DECISIONS.md`'s M7 part 2 planning entry) — sells
+/// `inventory_index` to the nearest vendor-kind `Interactable` via
+/// `game_core::sell_item`. Same "server re-resolves the vendor itself" shape
+/// as `BuyItemInput`.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SellItemInput {
+    pub inventory_index: usize,
+}
+
 /// Fixed size of netcode's connection-time `user_data` field (see
 /// `renetcode::NETCODE_USER_DATA_BYTES`, verified as 256 in that crate's
 /// source). `protocol` doesn't depend on `renet` directly, so this is a
@@ -232,7 +254,9 @@ impl Plugin for NetworkPlugin {
             .add_client_message::<SocketRuneInput>(Channel::Unreliable)
             .add_client_message::<UnsocketRuneInput>(Channel::Unreliable)
             .add_client_message::<AllocateStatPointInput>(Channel::Unreliable)
-            .add_client_message::<LearnSkillInput>(Channel::Unreliable);
+            .add_client_message::<LearnSkillInput>(Channel::Unreliable)
+            .add_client_message::<BuyItemInput>(Channel::Unreliable)
+            .add_client_message::<SellItemInput>(Channel::Unreliable);
     }
 }
 

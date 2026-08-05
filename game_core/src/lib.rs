@@ -13,12 +13,14 @@ pub mod status_effect;
 pub use combat::{
     AttackRequested, AttackTimer, CombatStats, DamageType, Health, MeleeAttack, Resistances,
 };
-pub use economy::Currency;
+pub use economy::{
+    buy_item, sell_item, socketed_item_sell_value, Currency, VendorLibrary, VendorListing,
+};
 pub use enemy::{Aggro, Enemy, EnemyKind};
 pub use interact::{
-    interact_or_pickup_system, is_near_interactable_with_panel, nearest_interactable_in_range,
+    interact_or_pickup_system, nearest_interactable_in_range, nearest_interactable_with_panel,
     InteractOrPickupRequested, Interactable, InteractableDefinition, InteractableLibrary,
-    FORGING_PANEL_ID, PICKUP_RANGE,
+    FORGING_PANEL_ID, PICKUP_RANGE, VENDOR_PANEL_ID,
 };
 pub use item::{
     equip_item, pickup_loot, roll_loot, socket_rune, unequip_item, unsocket_rune, DroppedLoot,

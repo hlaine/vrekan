@@ -1,4 +1,5 @@
 (
     slot: Weapon,
     socket_count: 2,
+    sell_value: 20,
 )

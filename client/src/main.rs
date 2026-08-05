@@ -18,21 +18,23 @@ use bevy_replicon_renet::{
     RenetChannelsExt, RenetClient, RepliconRenetPlugins,
 };
 use content::{
-    load_all_enemy_templates, load_all_interactable_templates, load_all_rune_templates,
-    EnemyTemplate, InteractableTemplate, RuneTemplate,
+    load_all_enemy_templates, load_all_interactable_templates, load_all_item_templates,
+    load_all_rune_templates, load_all_vendor_templates, EnemyTemplate, InteractableTemplate,
+    ItemTemplate, RuneTemplate, VendorTemplate,
 };
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
-    nearest_interactable_in_range, xp_required, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
-    EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
-    KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stat, Stats, Stunned,
-    UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE,
+    nearest_interactable_in_range, socketed_item_sell_value, xp_required, Currency, DeltaSeconds,
+    Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable,
+    Inventory, Item, ItemDrop, KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stat, Stats,
+    Stunned, UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE,
+    VENDOR_PANEL_ID,
 };
 use protocol::{
-    AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
-    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SocketRuneInput,
-    UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
+    AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
+    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SellItemInput,
+    SocketRuneInput, UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
@@ -81,7 +83,7 @@ const CHARACTER_TOGGLE_KEY: KeyCode = KeyCode::KeyC;
 // now (see `server/src/main.rs`'s `spawn_enemies`).
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 
-// Loaded locally purely for `dialog`/`opens_panel` lookup by an
+// Loaded locally purely for `dialog`/`opens_panels` lookup by an
 // `Interactable`'s `template_key` — same "server spawns/resolves, client
 // renders" split as `ENEMY_TEMPLATES_DIR`. Read by
 // `interaction_trigger_system`.
@@ -91,6 +93,17 @@ const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
 // panel — same split as `ENEMY_TEMPLATES_DIR` above; the server is what
 // actually resolves/charges a socket action (`game_core::socket_rune`).
 const RUNE_TEMPLATES_DIR: &str = "assets/runes";
+
+// Loaded locally purely for `sell_value` display in the vendor panel's
+// sell-price preview — same split as `ENEMY_TEMPLATES_DIR` above; the
+// server is what actually resolves/credits a sell (`game_core::sell_item`).
+const ITEM_TEMPLATES_DIR: &str = "assets/items";
+
+// Loaded locally purely for buy-listing display in the vendor panel —
+// same split as `ENEMY_TEMPLATES_DIR` above; the server independently
+// resolves/charges a purchase (`game_core::buy_item`) against its own
+// copy, never trusting what the client shows.
+const VENDOR_TEMPLATES_DIR: &str = "assets/vendors";
 
 // Relative to the assets root (loaded via AssetServer), not the filesystem
 // path used for ENEMY_TEMPLATES_DIR above. Must stay in sync with the
@@ -167,7 +180,7 @@ struct CharacterPanelOpen(bool);
 #[derive(Resource)]
 struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
 
-/// Interactable templates loaded purely for `dialog`/`opens_panel` lookup
+/// Interactable templates loaded purely for `dialog`/`opens_panels` lookup
 /// by an `Interactable`'s `template_key` — see `INTERACTABLE_TEMPLATES_DIR`'s
 /// doc comment.
 #[derive(Resource)]
@@ -178,24 +191,61 @@ struct InteractableTemplates(Vec<(String, InteractableTemplate)>);
 #[derive(Resource)]
 struct RuneTemplates(Vec<(String, RuneTemplate)>);
 
-/// Which panel `interaction_trigger_system` opened, if any: a runestone-style
-/// plain-text dialog, or the forging UI (gated to blacksmith-kind
-/// `Interactable`s server-side, see `game_core::FORGING_PANEL_ID`) — one
-/// button (`PICKUP_KEY`) resolves to at most one of these per press, same
-/// priority-with-no-double-trigger shape as `interact_or_pickup_system`'s
-/// interactable-vs-pickup split.
-#[derive(Clone, PartialEq)]
-enum InteractionPanelKind {
-    Dialog(String),
-    Forging,
+/// Item templates loaded purely for `sell_value` lookup by template key in
+/// the vendor panel's sell-price preview — see `ITEM_TEMPLATES_DIR`'s doc
+/// comment.
+#[derive(Resource)]
+struct ItemTemplates(Vec<(String, ItemTemplate)>);
+
+/// Vendor templates loaded purely for buy-listing display — see
+/// `VENDOR_TEMPLATES_DIR`'s doc comment. Looked up by the active vendor's
+/// `template_key` (`InteractionPanels::vendor`), not a single global list —
+/// each vendor has its own stock.
+#[derive(Resource)]
+struct VendorTemplates(Vec<(String, VendorTemplate)>);
+
+/// Which panel(s) `interaction_trigger_system` has opened. Unlike M8's
+/// original single-panel design, one `Interactable` can declare more than
+/// one `opens_panels` capability (e.g. a blacksmith is both `"forging"`
+/// and `"vendor"`, see `game_core::FORGING_PANEL_ID`/`VENDOR_PANEL_ID`),
+/// so `E` opens every capability the nearest interactable has rather than
+/// picking just one — three independent fields instead of an enum, since
+/// any subset can be open at once. `dialog` only ever gets set when
+/// neither panel applies (see `interaction_trigger_system`), matching the
+/// old either-or behavior for runestone-style NPCs. `vendor` carries
+/// *which* vendor's `template_key` to read its `VendorTemplate` listing
+/// from — not just a bool, since which vendor matters for that lookup.
+#[derive(Resource, Default)]
+struct InteractionPanels {
+    dialog: Option<String>,
+    forging_open: bool,
+    vendor: Option<String>,
 }
 
-/// Currently-open interaction panel, if any — set by
-/// `interaction_trigger_system`, cleared either by egui's own window close
-/// button (`dialog_panel_system`/`forging_panel_system`) or by pressing
-/// `PICKUP_KEY` again while it's open. `None` means no panel is shown.
+impl InteractionPanels {
+    fn any_open(&self) -> bool {
+        self.dialog.is_some() || self.forging_open || self.vendor.is_some()
+    }
+
+    /// Closes everything at once rather than one at a time — pressing
+    /// `PICKUP_KEY` again while *anything* is open should give a single
+    /// quick "get me out of this" escape (e.g. mid-fight), not require
+    /// remembering which panel is currently frontmost.
+    fn close_all(&mut self) {
+        self.dialog = None;
+        self.forging_open = false;
+        self.vendor = None;
+    }
+}
+
+/// Which inventory-item index (if any) is awaiting the sell confirmation
+/// click — selling is destructive (a socketed item's runes are gone for
+/// good, see `DECISIONS.md`'s M7 part 2 planning entry) and the user
+/// explicitly asked for a confirm step, unlike buying. Reset whenever the
+/// vendor panel closes, so a stale pending confirmation can't survive a
+/// reopen against a different vendor's item list.
 #[derive(Resource, Default)]
-struct InteractionPanel(Option<InteractionPanelKind>);
+struct PendingSell(Option<usize>);
 
 fn main() {
     App::new()
@@ -226,7 +276,8 @@ fn main() {
         .init_resource::<LocalPlayer>()
         .init_resource::<InventoryOpen>()
         .init_resource::<CharacterPanelOpen>()
-        .init_resource::<InteractionPanel>()
+        .init_resource::<InteractionPanels>()
+        .init_resource::<PendingSell>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
@@ -262,6 +313,7 @@ fn main() {
                 character_panel_system,
                 dialog_panel_system,
                 forging_panel_system,
+                vendor_panel_system,
             )
                 .chain(),
         )
@@ -288,6 +340,14 @@ fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
     let rune_templates = load_all_rune_templates(Path::new(RUNE_TEMPLATES_DIR))
         .unwrap_or_else(|error| panic!("failed to load rune templates: {error}"));
     commands.insert_resource(RuneTemplates(rune_templates));
+
+    let item_templates = load_all_item_templates(Path::new(ITEM_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load item templates: {error}"));
+    commands.insert_resource(ItemTemplates(item_templates));
+
+    let vendor_templates = load_all_vendor_templates(Path::new(VENDOR_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load vendor templates: {error}"));
+    commands.insert_resource(VendorTemplates(vendor_templates));
 }
 
 /// Loads this client's persistent character ID from the given path
@@ -944,27 +1004,30 @@ fn character_panel_system(
     }
 }
 
-/// Triggers whichever interaction panel applies: on `PICKUP_KEY`, finds the
-/// nearest in-range `Interactable` via `game_core::nearest_interactable_in_range`
-/// — the same priority rule `server::interact_or_pickup_system` uses for
-/// the real effect grant, shared rather than duplicated so the two can
-/// never disagree on which `Interactable` is "the" nearest one. A
-/// `FORGING_PANEL_ID` template opens the forging UI; otherwise, `dialog`
-/// text (if any) opens the plain-text dialog. Both are purely local reads
-/// of already-replicated data, no round-trip (see `DECISIONS.md`'s M8
-/// planning entry) — the forging UI's actual socket/unsocket actions are
-/// still a real round-trip, gated server-side by
-/// `game_core::is_near_interactable_with_panel`. Gated behind the same
-/// input-focus guard as every other non-protected hotkey (see
-/// `player_input_system`).
+/// Triggers whichever interaction panel(s) apply: on `PICKUP_KEY`, finds
+/// the nearest in-range `Interactable` via
+/// `game_core::nearest_interactable_in_range` — the same priority rule
+/// `server::interact_or_pickup_system` uses for the real effect grant,
+/// shared rather than duplicated so the two can never disagree on which
+/// `Interactable` is "the" nearest one. Opens every panel its template's
+/// `opens_panels` declares (a blacksmith opens both forging and vendor at
+/// once); if it declares none, falls back to `dialog` text instead — same
+/// either-or priority M8 originally had for a single panel. Both are
+/// purely local reads of already-replicated data, no round-trip (see
+/// `DECISIONS.md`'s M8 planning entry) — the forging/vendor panels'
+/// actual socket/buy/sell actions are still a real round-trip, gated
+/// server-side by `game_core::nearest_interactable_with_panel`. Gated
+/// behind the same input-focus guard as every other non-protected hotkey
+/// (see `player_input_system`).
 ///
-/// `PICKUP_KEY` toggles: if a panel is already open, the next press just
-/// closes it rather than re-checking proximity — a quick one-key dismiss
-/// for when it pops up mid-fight (e.g. picking up loot in range of a
-/// dialog `Interactable`), not just a window's own mouse-driven close
-/// button. The underlying interact/pickup request still fires every press
-/// regardless (see `player_input_system`) — this only toggles the local
-/// panel, not the server-resolved action.
+/// `PICKUP_KEY` toggles: if anything is already open, the next press just
+/// closes all of it (`InteractionPanels::close_all`) rather than
+/// re-checking proximity — a quick one-key dismiss for when it pops up
+/// mid-fight (e.g. picking up loot in range of a dialog `Interactable`),
+/// not just a window's own mouse-driven close button. The underlying
+/// interact/pickup request still fires every press regardless (see
+/// `player_input_system`) — this only toggles the local panel(s), not the
+/// server-resolved action.
 fn interaction_trigger_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     egui_wants_input: Res<EguiWantsInput>,
@@ -972,7 +1035,7 @@ fn interaction_trigger_system(
     positions: Query<&Position>,
     interactables: Query<(&Position, &Interactable)>,
     templates: Res<InteractableTemplates>,
-    mut interaction_panel: ResMut<InteractionPanel>,
+    mut panels: ResMut<InteractionPanels>,
 ) {
     if egui_wants_input.wants_keyboard_input() {
         return;
@@ -980,8 +1043,8 @@ fn interaction_trigger_system(
     if !keyboard.just_pressed(PICKUP_KEY) {
         return;
     }
-    if interaction_panel.0.is_some() {
-        interaction_panel.0 = None;
+    if panels.any_open() {
+        panels.close_all();
         return;
     }
     let Some(entity) = local_player.0 else {
@@ -1000,21 +1063,28 @@ fn interaction_trigger_system(
     else {
         return;
     };
-    if template.opens_panel.as_deref() == Some(FORGING_PANEL_ID) {
-        interaction_panel.0 = Some(InteractionPanelKind::Forging);
-    } else if let Some(dialog) = &template.dialog {
-        interaction_panel.0 = Some(InteractionPanelKind::Dialog(dialog.clone()));
+
+    let mut opened_any = false;
+    if template.opens_panels.iter().any(|p| p == FORGING_PANEL_ID) {
+        panels.forging_open = true;
+        opened_any = true;
+    }
+    if template.opens_panels.iter().any(|p| p == VENDOR_PANEL_ID) {
+        panels.vendor = Some(interactable.template_key.clone());
+        opened_any = true;
+    }
+    if !opened_any {
+        if let Some(dialog) = &template.dialog {
+            panels.dialog = Some(dialog.clone());
+        }
     }
 }
 
-/// Read-only dialog window shown when `InteractionPanel` holds `Dialog`;
+/// Read-only dialog window shown when `InteractionPanels::dialog` is set;
 /// closed via egui's own close button, which clears it back to `None`. No
 /// text input, so (like the HUD) doesn't need the input-focus guard.
-fn dialog_panel_system(
-    mut contexts: EguiContexts,
-    mut interaction_panel: ResMut<InteractionPanel>,
-) {
-    let Some(InteractionPanelKind::Dialog(text)) = interaction_panel.0.clone() else {
+fn dialog_panel_system(mut contexts: EguiContexts, mut panels: ResMut<InteractionPanels>) {
+    let Some(text) = panels.dialog.clone() else {
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -1026,7 +1096,7 @@ fn dialog_panel_system(
         ui.label(text);
     });
     if !open {
-        interaction_panel.0 = None;
+        panels.dialog = None;
     }
 }
 
@@ -1085,27 +1155,28 @@ fn socket_row(
     });
 }
 
-/// Forging panel: shown when `InteractionPanel` holds `Forging` (opened by
-/// `interaction_trigger_system` near a blacksmith-kind `Interactable`).
-/// Lists each equipped item's sockets with socket/unsocket buttons —
-/// replaces M7's `F7`/`F8`/`F9` hotkey stand-ins (removed now that the
-/// panel exists, per `ROADMAP.md`, same precedent as the inventory panel
-/// replacing `F1`-`F6`). The actual socket/unsocket is still a server
-/// round-trip, proximity-gated there too (`is_near_interactable_with_panel`)
-/// — this panel can be left open while walking away, at which point those
-/// requests just silently no-op, same "invalid action, no client-side
-/// feedback yet" treatment every other action system already has.
+/// Forging panel: shown when `InteractionPanels::forging_open` is set
+/// (opened by `interaction_trigger_system` near a blacksmith-kind
+/// `Interactable`). Lists each equipped item's sockets with socket/unsocket
+/// buttons — replaces M7's `F7`/`F8`/`F9` hotkey stand-ins (removed now
+/// that the panel exists, per `ROADMAP.md`, same precedent as the
+/// inventory panel replacing `F1`-`F6`). The actual socket/unsocket is
+/// still a server round-trip, proximity-gated there too
+/// (`game_core::nearest_interactable_with_panel`) — this panel can be
+/// left open while walking away, at which point those requests just
+/// silently no-op, same "invalid action, no client-side feedback yet"
+/// treatment every other action system already has.
 #[allow(clippy::too_many_arguments)] // one query/resource per rendered/interactive concern, inherent to this panel's job
 fn forging_panel_system(
     mut contexts: EguiContexts,
     local_player: Res<LocalPlayer>,
-    mut interaction_panel: ResMut<InteractionPanel>,
+    mut panels: ResMut<InteractionPanels>,
     query: Query<(&Equipment, &RuneInventory, &Currency)>,
     rune_templates: Res<RuneTemplates>,
     mut socket_input: MessageWriter<SocketRuneInput>,
     mut unsocket_input: MessageWriter<UnsocketRuneInput>,
 ) {
-    if !matches!(interaction_panel.0, Some(InteractionPanelKind::Forging)) {
+    if !panels.forging_open {
         return;
     }
     let Some(entity) = local_player.0 else {
@@ -1170,6 +1241,119 @@ fn forging_panel_system(
         unsocket_input.write(UnsocketRuneInput { slot, socket_index });
     }
     if !open {
-        interaction_panel.0 = None;
+        panels.forging_open = false;
+    }
+}
+
+/// Vendor panel: shown when `InteractionPanels::vendor` holds a vendor's
+/// `template_key` (opened by `interaction_trigger_system` near a
+/// vendor-kind `Interactable` — a merchant, or a blacksmith that also
+/// vends). Buy is one click; sell requires an explicit confirm step first
+/// (`PendingSell`) since it's destructive — a socketed item's runes are
+/// gone for good on sell, per `DECISIONS.md`'s M7 part 2 planning entry.
+/// The sell-price preview reuses `game_core::socketed_item_sell_value`
+/// against this client's own locally-loaded `ItemTemplates`/
+/// `RuneTemplates`, the same formula the server's authoritative
+/// `sell_item` uses, so the two can't disagree about what an item is
+/// actually worth. Buying/selling are still real round-trips, proximity-
+/// gated server-side (`game_core::nearest_interactable_with_panel`) —
+/// same "can be left open while walking away, requests just silently
+/// no-op" treatment as the forging panel.
+#[allow(clippy::too_many_arguments)] // one query/resource per rendered/interactive concern, inherent to this panel's job
+fn vendor_panel_system(
+    mut contexts: EguiContexts,
+    local_player: Res<LocalPlayer>,
+    mut panels: ResMut<InteractionPanels>,
+    mut pending_sell: ResMut<PendingSell>,
+    query: Query<(&Inventory, &Currency)>,
+    vendor_templates: Res<VendorTemplates>,
+    item_templates: Res<ItemTemplates>,
+    rune_templates: Res<RuneTemplates>,
+    mut buy_input: MessageWriter<BuyItemInput>,
+    mut sell_input: MessageWriter<SellItemInput>,
+) {
+    let Some(vendor_key) = panels.vendor.clone() else {
+        return;
+    };
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok((inventory, currency)) = query.get(entity) else {
+        return;
+    };
+    let Some((_, vendor_template)) = vendor_templates
+        .0
+        .iter()
+        .find(|(key, _)| *key == vendor_key)
+    else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut open = true;
+    let mut buy_clicked = None;
+    let mut sell_confirmed = None;
+
+    egui::Window::new("Vendor").open(&mut open).show(ctx, |ui| {
+        ui.label(format!("Coins: {}", currency.0));
+        ui.separator();
+
+        ui.heading("Buy");
+        for (index, listing) in vendor_template.inventory.iter().enumerate() {
+            let affordable = currency.0 >= listing.price;
+            let label = format!("{} - {}g", listing.item_template_key, listing.price);
+            if ui
+                .add_enabled(affordable, egui::Button::new(label))
+                .clicked()
+            {
+                buy_clicked = Some(index);
+            }
+        }
+
+        ui.separator();
+        ui.heading("Sell");
+        for (index, item) in inventory.0.iter().enumerate() {
+            let base_sell_value = item_templates
+                .0
+                .iter()
+                .find(|(key, _)| *key == item.template_key)
+                .map(|(_, template)| template.sell_value)
+                .unwrap_or(0);
+            let sell_value = socketed_item_sell_value(base_sell_value, &item.sockets, |rune_id| {
+                rune_templates
+                    .0
+                    .iter()
+                    .find(|(key, _)| key == rune_id)
+                    .map(|(_, template)| template.socket_cost)
+            });
+
+            ui.horizontal(|ui| {
+                ui.label(format!("{} ({sell_value}g)", item.template_key));
+                if pending_sell.0 == Some(index) {
+                    if ui.button("Confirm").clicked() {
+                        sell_confirmed = Some(index);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        pending_sell.0 = None;
+                    }
+                } else if ui.button("Sell").clicked() {
+                    pending_sell.0 = Some(index);
+                }
+            });
+        }
+    });
+
+    if let Some(listing_index) = buy_clicked {
+        buy_input.write(BuyItemInput { listing_index });
+    }
+    if let Some(inventory_index) = sell_confirmed {
+        sell_input.write(SellItemInput { inventory_index });
+        pending_sell.0 = None;
+    }
+    if !open {
+        panels.vendor = None;
+        pending_sell.0 = None;
     }
 }

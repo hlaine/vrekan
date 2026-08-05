@@ -230,7 +230,7 @@ Claude Code tasks as you start it, not all upfront.
   per enemy instance from `EnemyTemplate::loot_table`/`drop_chance`,
   rolled once at the exact moment of death inside `combat::death_system`
   (see `game_core::roll_loot`).
-- [ ] Vendor buy/sell economy, individual currency per player — see
+- [x] Vendor buy/sell economy, individual currency per player — see
   `MECHANICS.md`. Deferred to a part 2 pass: `MECHANICS.md` itself calls
   this "a distinct system" from the loot/forging pipeline above. Currency
   is built once here and shared by both vendors and forging cost (see
@@ -270,9 +270,50 @@ Claude Code tasks as you start it, not all upfront.
     socketing is testable without an enemy kill first. Confirmed live:
     unaffordable rune buttons greyed out, a successful socket deducted
     coins, unsocketing gave no refund.
-  - [ ] Vendor buy/sell UI and content schema (prices) are still not
-    built — this pass covered the currency foundation and forging cost,
-    not vendors.
+  - [x] Vendor buy/sell UI and content schema shipped. `Interactable`'s
+    single `opens_panel: Option<String>` generalized to
+    `opens_panels: Vec<String>` — one NPC can now offer more than one
+    capability (a blacksmith is both `"forging"` and `"vendor"`), with `E`
+    opening every panel the nearest interactable declares at once (falling
+    back to `dialog` only if none apply), and closing all of them together
+    on a second press rather than one at a time. New `game_core::economy`:
+    `VendorListing`/`VendorLibrary`, `buy_item` (charges a vendor's listed
+    price, sizes the new item's sockets from its template), `sell_item` +
+    shared `socketed_item_sell_value` (an item's base `ItemDefinition::
+    sell_value` plus each socketed rune's own `socket_cost` — reused as
+    the rune's implicit worth, since runes still can't be bought/sold on
+    their own; break-even by design, socketing then immediately reselling
+    nets back exactly what the socketing cost). `ItemDefinition`/
+    `content::ItemTemplate` gain a required `sell_value: u32` (same
+    "conscious choice" convention as `xp_reward`/`socket_cost`). New
+    `content::economy::VendorTemplate` (`assets/vendors/*.ron`), keyed by
+    the same `template_key` as its `Interactable` placement — a
+    `blacksmith.ron` (rusty/steel swords) and a new `merchant.ron`
+    (armor/helmet), the merchant being a vendor-only NPC placed at a third
+    map point purely from content, no new mechanism. Two new `protocol`
+    messages, `BuyItemInput`/`SellItemInput` — neither carries *which*
+    vendor; the server re-resolves the nearest vendor-panel `Interactable`
+    itself from the actor's position (`nearest_interactable_with_panel`,
+    replacing the old bool-returning `is_near_interactable_with_panel`),
+    never trusting a client-claimed target. Client's vendor panel requires
+    an explicit Confirm/Cancel step before a sell actually fires (the
+    user's call — selling is destructive, a socketed item's runes are
+    lost with no refund) but buys immediately (not destructive). New
+    client-local `ItemTemplates`/`VendorTemplates` resources purely for
+    the buy-listing/sell-price-preview display, reusing
+    `socketed_item_sell_value` directly rather than re-deriving the
+    formula. `spawn_starter_loot`'s currency bumped 50→150 to cover both a
+    socket action and the blacksmith's pricier `steel_sword` listing.
+    **Confirmed live:** blacksmith opens both panels together; bought
+    `steel_sword` and watched coins/inventory update; sold an item via the
+    confirm flow (and separately confirmed Cancel does nothing); merchant
+    opens vendor-only with its own distinct stock; `E` closes every open
+    panel at once regardless of how many were open.
+    Weapon-power scaling itself (vendors selling mechanically stronger
+    weapons, not just more sockets) is explicitly out of scope — blocked
+    on the same not-yet-built "weapon-driven combat stats" prerequisite
+    `DECISIONS.md` already flagged for M8's deferred hotbar/weapon-swap
+    items.
 - [ ] Enemy visual-variant data shape (shared base template + swappable
   sprite field) — see `MECHANICS.md`. Deferred to the same part 2 pass;
   unrelated to forging, just filed under the same milestone.

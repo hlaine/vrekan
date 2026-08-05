@@ -32,11 +32,16 @@ pub struct Item {
 /// comment for the same content-not-engine-code principle. Loaded once
 /// into a `Res<ItemLibrary>` and looked up by template key (e.g. to
 /// determine which `EquipSlot` an inventory item belongs in when equipped,
-/// or how many sockets a freshly-rolled drop should have).
+/// or how many sockets a freshly-rolled drop should have). `sell_value` is
+/// the base price any vendor pays for this item template (see
+/// `economy::sell_item`) — a universal, item-intrinsic value, distinct
+/// from a specific vendor's own *buy* prices (`economy::VendorListing`),
+/// so any vendor can buy back any item regardless of what it sells.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemDefinition {
     pub slot: EquipSlot,
     pub socket_count: u32,
+    pub sell_value: u32,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
@@ -353,6 +358,7 @@ mod tests {
             ItemDefinition {
                 slot: EquipSlot::Weapon,
                 socket_count: 2,
+                sell_value: 5,
             },
         );
 
@@ -375,6 +381,7 @@ mod tests {
             ItemDefinition {
                 slot: EquipSlot::Weapon,
                 socket_count: 0,
+                sell_value: 5,
             },
         );
 
@@ -692,6 +699,7 @@ mod tests {
             ItemDefinition {
                 slot: EquipSlot::Weapon,
                 socket_count: 3,
+                sell_value: 5,
             },
         );
         let mut rng = rand::rng();

@@ -9,11 +9,14 @@ use crate::ContentError;
 /// Data-driven shape for an item template — `EquipSlot` is reused directly
 /// from `game_core` (not mirrored like `EffectKindTemplate` mirrors
 /// `EffectKind`) since it carries no data that needs a content-vs-engine
-/// conversion, unlike e.g. `DamageType`.
+/// conversion, unlike e.g. `DamageType`. `sell_value` is required, not
+/// defaulted — same "a content author always makes a conscious choice"
+/// convention as `EnemyTemplate::xp_reward`/`RuneTemplate::socket_cost`.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ItemTemplate {
     pub slot: EquipSlot,
     pub socket_count: u32,
+    pub sell_value: u32,
 }
 
 impl ItemTemplate {
@@ -21,6 +24,7 @@ impl ItemTemplate {
         ItemDefinition {
             slot: self.slot,
             socket_count: self.socket_count,
+            sell_value: self.sell_value,
         }
     }
 }
@@ -145,12 +149,14 @@ mod tests {
             r#"(
                 slot: Weapon,
                 socket_count: 2,
+                sell_value: 5,
             )"#,
         )
         .unwrap();
 
         assert_eq!(template.slot, EquipSlot::Weapon);
         assert_eq!(template.socket_count, 2);
+        assert_eq!(template.sell_value, 5);
     }
 
     #[test]
@@ -187,8 +193,16 @@ mod tests {
             "item_load_all_sorted"
         ));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("b_helmet.ron"), "(slot: Helmet, socket_count: 1)").unwrap();
-        fs::write(dir.join("a_sword.ron"), "(slot: Weapon, socket_count: 2)").unwrap();
+        fs::write(
+            dir.join("b_helmet.ron"),
+            "(slot: Helmet, socket_count: 1, sell_value: 5)",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("a_sword.ron"),
+            "(slot: Weapon, socket_count: 2, sell_value: 5)",
+        )
+        .unwrap();
 
         let templates = load_all_item_templates(&dir).unwrap();
 

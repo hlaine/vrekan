@@ -1,0 +1,6 @@
+(
+    inventory: [
+        (item_template_key: "leather_armor", price: 30),
+        (item_template_key: "wolf_pelt_cap", price: 25),
+    ],
+)

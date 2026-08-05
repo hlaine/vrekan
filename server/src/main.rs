@@ -22,7 +22,7 @@ use bevy_replicon_renet::{
 };
 use content::{
     load_all_enemy_templates, load_all_interactable_templates, load_all_item_templates,
-    load_all_rune_templates, load_all_skill_templates, spawn_enemy,
+    load_all_rune_templates, load_all_skill_templates, load_all_vendor_templates, spawn_enemy,
 };
 use game_core::combat::{
     attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, CombatStats,
@@ -31,20 +31,21 @@ use game_core::combat::{
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
-    allocate_stat_point, apply_death_xp_penalty, equip_item, interact_or_pickup_system,
-    is_near_interactable_with_panel, learn_skill, reset_xp_on_full_wipe, revive_system,
+    allocate_stat_point, apply_death_xp_penalty, buy_item, equip_item, interact_or_pickup_system,
+    learn_skill, nearest_interactable_with_panel, reset_xp_on_full_wipe, revive_system, sell_item,
     skill_cast_system, socket_rune, tick_od_regen, tick_skill_cooldowns, tick_status_effects,
     unequip_item, unsocket_rune, ActiveEffects, Currency, DeltaSeconds, Downed, DroppedLoot,
     EffectDefinition, EffectKind, EffectTarget, Enemy, Equipment, Facing,
     InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory, Item, ItemDrop,
     ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving, RuneInventory,
     RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned,
-    UnspentSkillPoints, UnspentStatPoints, Velocity, FORGING_PANEL_ID,
+    UnspentSkillPoints, UnspentStatPoints, Velocity, VendorLibrary, FORGING_PANEL_ID,
+    VENDOR_PANEL_ID,
 };
 use protocol::{
-    AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
-    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SocketRuneInput,
-    UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
+    AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
+    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SellItemInput,
+    SocketRuneInput, UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_SPEED: f32 = 200.0;
@@ -77,6 +78,7 @@ const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 const ITEM_TEMPLATES_DIR: &str = "assets/items";
 const RUNE_TEMPLATES_DIR: &str = "assets/runes";
 const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
+const VENDOR_TEMPLATES_DIR: &str = "assets/vendors";
 // Enemies spawn in the map's bottom open field (rows 12-14, well clear of
 // the mountain band and the player's top-left spawn point) — see
 // assets/maps/valley.tmx and spawn_map_colliders' coordinate convention.
@@ -159,6 +161,7 @@ fn main() {
                 load_skills,
                 load_items,
                 load_interactables,
+                load_vendors,
                 setup,
                 spawn_map_colliders,
                 spawn_enemies,
@@ -210,6 +213,8 @@ fn main() {
                     apply_unequip_input,
                     apply_socket_rune_input,
                     apply_unsocket_rune_input,
+                    apply_buy_item_input,
+                    apply_sell_item_input,
                     apply_allocate_stat_point_input,
                     apply_learn_skill_input,
                 )
@@ -323,6 +328,23 @@ fn load_interactables(mut commands: Commands) {
         .map(|(id, template)| (id, template.into_definition()))
         .collect();
     commands.insert_resource(InteractableLibrary(library));
+}
+
+/// Loads every vendor template into `Res<VendorLibrary>` — same "fail
+/// loudly before anyone connects" convention as `load_interactables`.
+/// Keyed by the same `template_key` a vendor-kind `Interactable` uses (see
+/// `game_core::VendorLibrary`'s doc comment), not cross-checked against
+/// `InteractableLibrary` here — a vendor template with no matching
+/// `Interactable` placed anywhere just never gets read, same as an
+/// `InteractableLibrary` entry for a key nothing places.
+fn load_vendors(mut commands: Commands) {
+    let templates = load_all_vendor_templates(Path::new(VENDOR_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load vendor templates: {error}"));
+    let library = templates
+        .into_iter()
+        .map(|(id, template)| (id, template.into_listings()))
+        .collect();
+    commands.insert_resource(VendorLibrary(library));
 }
 
 /// Every connected client is represented as an entity with `ConnectedClient`;
@@ -703,17 +725,18 @@ fn spawn_enemies(mut commands: Commands) {
 }
 
 /// Starter loot: a socketed weapon, one of each rune, and enough currency
-/// to actually socket one, spawned once per new game (not on every
-/// restart of an existing one — see below) so a fresh character has
-/// something to forge with straight away rather than grinding enemy kills
-/// first — confirmed as wanted, kept rather than stripped out as a
+/// to socket, buy, and sell right away, spawned once per new game (not on
+/// every restart of an existing one — see below) so a fresh character has
+/// something to forge/trade with straight away rather than grinding enemy
+/// kills first — confirmed as wanted, kept rather than stripped out as a
 /// one-off test aid (see `ROADMAP.md`'s M8 step 10 entry). The currency
-/// amount (50) covers either rune's `socket_cost` (20/15 as of M7 part
-/// 2's socketing-cost pass) with some left over, so socketing is testable
-/// without needing an enemy kill first either. Placed at the midpoint
-/// between the runestone and blacksmith (x=100/x=540), safely outside
-/// either's 60-unit interact range so `E` there always picks up rather
-/// than interacting.
+/// amount (150) covers a rune's `socket_cost` (20/15) and the blacksmith's
+/// pricier `steel_sword` listing (90g, see `assets/vendors/blacksmith.ron`)
+/// with some left over, so both socketing and buying are testable without
+/// needing an enemy kill first either. Placed at the midpoint between the
+/// runestone and blacksmith (x=100/x=540), safely outside either's
+/// 60-unit interact range so `E` there always picks up rather than
+/// interacting.
 ///
 /// Gated on the same new-vs-existing-game check `load_game_password` makes
 /// (a fresh disk read, not a shared resource, to avoid a Startup-ordering
@@ -744,7 +767,7 @@ fn spawn_starter_loot(mut commands: Commands, game_id: Res<GameId>) {
     ));
     commands.spawn((
         Position { x: 360.0, y: 30.0 },
-        ItemDrop(DroppedLoot::Currency(50)),
+        ItemDrop(DroppedLoot::Currency(150)),
     ));
 }
 
@@ -1036,12 +1059,14 @@ fn apply_socket_rune_input(
         else {
             continue;
         };
-        if !is_near_interactable_with_panel(
+        if nearest_interactable_with_panel(
             actor_pos,
             FORGING_PANEL_ID,
             interactables.iter(),
             &interactable_library,
-        ) {
+        )
+        .is_none()
+        {
             continue;
         }
         socket_rune(
@@ -1072,12 +1097,14 @@ fn apply_unsocket_rune_input(
         let Ok((actor_pos, mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
             continue;
         };
-        if !is_near_interactable_with_panel(
+        if nearest_interactable_with_panel(
             actor_pos,
             FORGING_PANEL_ID,
             interactables.iter(),
             &interactable_library,
-        ) {
+        )
+        .is_none()
+        {
             continue;
         }
         unsocket_rune(
@@ -1085,6 +1112,87 @@ fn apply_unsocket_rune_input(
             &mut rune_inventory,
             input.slot,
             input.socket_index,
+        );
+    }
+}
+
+/// Turns a client's `BuyItemInput` into `game_core::buy_item`'s
+/// resolution — a no-op (see that function's doc comment) for
+/// insufficient currency or an unknown item template. Also a no-op if the
+/// actor isn't in range of a vendor-kind `Interactable` (`VENDOR_PANEL_ID`)
+/// — the server re-resolves *which* vendor itself from the actor's
+/// position rather than trusting a client-claimed vendor id, using that
+/// vendor's own `template_key` to look up its `VendorLibrary` listing.
+fn apply_buy_item_input(
+    mut inputs: MessageReader<FromClient<BuyItemInput>>,
+    mut players: Query<(&Position, &mut Inventory, &mut Currency)>,
+    interactables: Query<(&Position, &Interactable)>,
+    interactable_library: Res<InteractableLibrary>,
+    vendor_library: Res<VendorLibrary>,
+    items: Res<ItemLibrary>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((actor_pos, mut inventory, mut currency)) = players.get_mut(entity) else {
+            continue;
+        };
+        let Some(vendor) = nearest_interactable_with_panel(
+            actor_pos,
+            VENDOR_PANEL_ID,
+            interactables.iter(),
+            &interactable_library,
+        ) else {
+            continue;
+        };
+        let Some(listings) = vendor_library.0.get(&vendor.template_key) else {
+            continue;
+        };
+        let Some(listing) = listings.get(input.listing_index) else {
+            continue;
+        };
+        buy_item(&mut inventory, &mut currency, &items, listing);
+    }
+}
+
+/// Turns a client's `SellItemInput` into `game_core::sell_item`'s
+/// resolution — a no-op for an out-of-range index or an unknown item
+/// template. Gated behind the same vendor-proximity check as
+/// `apply_buy_item_input`, same reasoning as forging's socket/unsocket
+/// pair both requiring blacksmith proximity even though only one of them
+/// actually costs anything.
+fn apply_sell_item_input(
+    mut inputs: MessageReader<FromClient<SellItemInput>>,
+    mut players: Query<(&Position, &mut Inventory, &mut Currency)>,
+    interactables: Query<(&Position, &Interactable)>,
+    interactable_library: Res<InteractableLibrary>,
+    items: Res<ItemLibrary>,
+    runes: Res<RuneLibrary>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((actor_pos, mut inventory, mut currency)) = players.get_mut(entity) else {
+            continue;
+        };
+        if nearest_interactable_with_panel(
+            actor_pos,
+            VENDOR_PANEL_ID,
+            interactables.iter(),
+            &interactable_library,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        sell_item(
+            &mut inventory,
+            &mut currency,
+            &items,
+            &runes,
+            input.inventory_index,
         );
     }
 }

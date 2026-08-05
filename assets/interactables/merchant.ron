@@ -1,0 +1,6 @@
+(
+    range: 60.0,
+    dialog: Some("The merchant gestures at their wares, laid out on a worn cloth."),
+    effect: None,
+    opens_panels: ["vendor"],
+)

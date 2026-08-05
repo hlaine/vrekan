@@ -12,10 +12,11 @@ use crate::ContentError;
 /// travels with the replicated `Interactable` component itself (not looked
 /// up from this template at interaction time), but lives here too since a
 /// content author picks it per-template just like every other field.
-/// `dialog`/`opens_panel` are read client-side only (dialog panel is M8
-/// step 9, forging-gate is step 10); `effect`, if any, is resolved
-/// server-side into `game_core::InteractableDefinition` via
-/// `into_definition`.
+/// `dialog`/`opens_panels` are read client-side only; `effect`, if any, is
+/// resolved server-side into `game_core::InteractableDefinition` via
+/// `into_definition`. `opens_panels` is a list, not a single value — one
+/// NPC can offer more than one capability (e.g. a blacksmith is both
+/// `"forging"` and `"vendor"`).
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct InteractableTemplate {
     pub range: f32,
@@ -24,14 +25,14 @@ pub struct InteractableTemplate {
     #[serde(default)]
     pub effect: Option<EffectTemplate>,
     #[serde(default)]
-    pub opens_panel: Option<String>,
+    pub opens_panels: Vec<String>,
 }
 
 impl InteractableTemplate {
     pub fn into_definition(self) -> InteractableDefinition {
         InteractableDefinition {
             effect: self.effect.map(EffectTemplate::into_definition),
-            opens_panel: self.opens_panel,
+            opens_panels: self.opens_panels,
         }
     }
 }
@@ -80,16 +81,16 @@ mod tests {
         assert_eq!(template.range, 60.0);
         assert_eq!(template.dialog, None);
         assert_eq!(template.effect, None);
-        assert_eq!(template.opens_panel, None);
+        assert!(template.opens_panels.is_empty());
     }
 
     #[test]
-    fn parses_a_full_template_with_dialog_and_opens_panel() {
+    fn parses_a_full_template_with_dialog_and_opens_panels() {
         let template = parse_interactable_template(
             r#"(
                 range: 60.0,
                 dialog: Some("An ancient rune hums with power."),
-                opens_panel: Some("forging"),
+                opens_panels: ["forging", "vendor"],
             )"#,
         )
         .unwrap();
@@ -98,7 +99,10 @@ mod tests {
             template.dialog,
             Some("An ancient rune hums with power.".to_string())
         );
-        assert_eq!(template.opens_panel, Some("forging".to_string()));
+        assert_eq!(
+            template.opens_panels,
+            vec!["forging".to_string(), "vendor".to_string()]
+        );
     }
 
     #[test]
@@ -107,18 +111,21 @@ mod tests {
     }
 
     #[test]
-    fn into_definition_converts_the_effect_and_carries_opens_panel_through() {
+    fn into_definition_converts_the_effect_and_carries_opens_panels_through() {
         let template = InteractableTemplate {
             range: 60.0,
             dialog: None,
             effect: None,
-            opens_panel: Some("forging".to_string()),
+            opens_panels: vec!["forging".to_string(), "vendor".to_string()],
         };
 
         let definition = template.into_definition();
 
         assert_eq!(definition.effect, None);
-        assert_eq!(definition.opens_panel, Some("forging".to_string()));
+        assert_eq!(
+            definition.opens_panels,
+            vec!["forging".to_string(), "vendor".to_string()]
+        );
     }
 
     #[test]

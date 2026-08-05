@@ -1,0 +1,6 @@
+(
+    inventory: [
+        (item_template_key: "rusty_sword", price: 40),
+        (item_template_key: "steel_sword", price: 90),
+    ],
+)
