@@ -23,9 +23,10 @@ use content::{
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
-    xp_required, DeltaSeconds, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing,
-    Health, Interactable, Inventory, Item, ItemDrop, KnownSkills, Level, Od, SkillCooldowns, Stat,
-    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, LEASH_DISTANCE,
+    nearest_interactable_in_range, xp_required, DeltaSeconds, Downed, DroppedLoot, Enemy,
+    EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
+    KnownSkills, Level, Od, SkillCooldowns, Stat, Stats, Stunned, UnspentSkillPoints,
+    UnspentStatPoints, LEASH_DISTANCE,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -92,10 +93,7 @@ const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 
 // Loaded locally purely for `dialog` text lookup by an `Interactable`'s
 // `template_key` — same "server spawns/resolves, client renders" split as
-// `ENEMY_TEMPLATES_DIR`. Nothing places an `Interactable` in the world yet
-// (M8 step 8), and no panel reads `dialog` yet either (step 9), so this
-// resource is loaded but unused for now — same "data ready, UI/content
-// gated behind a later step" shape as M5's `Stats` bonuses.
+// `ENEMY_TEMPLATES_DIR`. Read by `dialog_trigger_system` (M8 step 9).
 const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
 
 // Relative to the assets root (loaded via AssetServer), not the filesystem
@@ -175,13 +173,17 @@ struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
 
 /// Interactable templates loaded purely for `dialog` text lookup by an
 /// `Interactable`'s `template_key` — see `INTERACTABLE_TEMPLATES_DIR`'s doc
-/// comment for why this is unused today.
+/// comment.
 #[derive(Resource)]
-struct InteractableTemplates(
-    // Genuinely unread until M8 step 9's dialog panel exists to look
-    // dialog text up from it — not a stale/dead leftover.
-    #[allow(dead_code)] Vec<(String, InteractableTemplate)>,
-);
+struct InteractableTemplates(Vec<(String, InteractableTemplate)>);
+
+/// Currently-displayed dialog panel text, if any — set by
+/// `dialog_trigger_system` when the interact button is pressed near an
+/// `Interactable` whose template has `dialog` text, cleared by egui's own
+/// window close button (`dialog_panel_system`). `None` means the panel is
+/// hidden.
+#[derive(Resource, Default)]
+struct DialogPanel(Option<String>);
 
 fn main() {
     App::new()
@@ -212,6 +214,7 @@ fn main() {
         .init_resource::<LocalPlayer>()
         .init_resource::<InventoryOpen>()
         .init_resource::<CharacterPanelOpen>()
+        .init_resource::<DialogPanel>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
@@ -222,6 +225,7 @@ fn main() {
                 init_replicated_item_drops,
                 init_replicated_interactables,
                 player_input_system,
+                dialog_trigger_system,
                 sync_transform_system,
                 party_camera_system,
                 player_appearance_system,
@@ -240,7 +244,13 @@ fn main() {
         // automated check, since nothing exercises real mouse clicks.
         .add_systems(
             EguiPrimaryContextPass,
-            (hud_system, inventory_panel_system, character_panel_system).chain(),
+            (
+                hud_system,
+                inventory_panel_system,
+                character_panel_system,
+                dialog_panel_system,
+            )
+                .chain(),
         )
         .run();
 }
@@ -934,5 +944,82 @@ fn character_panel_system(
         learn_input.write(LearnSkillInput {
             skill_id: skill_id.to_string(),
         });
+    }
+}
+
+/// Triggers the dialog panel: on `PICKUP_KEY`, finds the nearest in-range
+/// `Interactable` via `game_core::nearest_interactable_in_range` — the same
+/// priority rule `server::interact_or_pickup_system` uses for the real
+/// effect grant, shared rather than duplicated so the two can never
+/// disagree on which `Interactable` is "the" nearest one — and, if its
+/// template has `dialog` text, shows it. Purely a local read of
+/// already-replicated data, no round-trip (see `DECISIONS.md`'s M8
+/// planning entry). Gated behind the same input-focus guard as every other
+/// non-protected hotkey (see `player_input_system`).
+///
+/// `PICKUP_KEY` toggles: if the panel is already open, the next press just
+/// closes it rather than re-checking proximity — a quick one-key dismiss
+/// for when it pops up mid-fight (e.g. picking up loot in range of a
+/// dialog `Interactable`), not just the window's own mouse-driven close
+/// button. The underlying interact/pickup request still fires every press
+/// regardless (see `player_input_system`) — this only toggles the local
+/// dialog overlay, not the server-resolved action.
+fn dialog_trigger_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    egui_wants_input: Res<EguiWantsInput>,
+    local_player: Res<LocalPlayer>,
+    positions: Query<&Position>,
+    interactables: Query<(&Position, &Interactable)>,
+    templates: Res<InteractableTemplates>,
+    mut dialog_panel: ResMut<DialogPanel>,
+) {
+    if egui_wants_input.wants_keyboard_input() {
+        return;
+    }
+    if !keyboard.just_pressed(PICKUP_KEY) {
+        return;
+    }
+    if dialog_panel.0.is_some() {
+        dialog_panel.0 = None;
+        return;
+    }
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok(actor_pos) = positions.get(entity) else {
+        return;
+    };
+    let Some(interactable) = nearest_interactable_in_range(actor_pos, interactables.iter()) else {
+        return;
+    };
+    let Some((_, template)) = templates
+        .0
+        .iter()
+        .find(|(key, _)| *key == interactable.template_key)
+    else {
+        return;
+    };
+    if let Some(dialog) = &template.dialog {
+        dialog_panel.0 = Some(dialog.clone());
+    }
+}
+
+/// Read-only dialog window showing whatever `DialogPanel` currently holds;
+/// closed via egui's own close button, which clears it back to `None`. No
+/// text input, so (like the HUD) doesn't need the input-focus guard.
+fn dialog_panel_system(mut contexts: EguiContexts, mut dialog_panel: ResMut<DialogPanel>) {
+    let Some(text) = dialog_panel.0.clone() else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new("Dialog").open(&mut open).show(ctx, |ui| {
+        ui.label(text);
+    });
+    if !open {
+        dialog_panel.0 = None;
     }
 }

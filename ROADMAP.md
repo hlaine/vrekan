@@ -431,10 +431,27 @@ starting found two gaps folded in below (marked "found via review").
   far from either object, then standing at the effect-less blacksmith)
   rather than a bug; only found the *actual* correct interpretation by
   adding temporary instrumentation rather than guessing further.
-9. [ ] Dialog panel (generic text window) for runestone-style
+9. [x] Dialog panel (generic text window) for runestone-style
   interactions — the simpler of the two interaction outcomes, built
   first to validate the whole `Interactable` pipeline end-to-end before
   adding forging's extra gating logic below.
+  Extracted `game_core::nearest_interactable_in_range` out of
+  `interact_or_pickup_system` so the client's dialog trigger and the
+  server's effect resolution share one priority rule instead of the
+  client re-implementing it — matters because the dialog has to open
+  instantly, client-side, with no server round-trip (per `DECISIONS.md`'s
+  M8 planning entry). New `client::DialogPanel` resource +
+  `dialog_trigger_system`/`dialog_panel_system`, rendered from
+  `EguiPrimaryContextPass` like the other panels. **Confirmed live, then
+  refined from live feedback:** the first pass closed the dialog only via
+  egui's own mouse-driven close button; testing it revealed that's
+  awkward when the dialog pops up mid-fight (e.g. picking up loot in
+  range of a dialog `Interactable`), so `PICKUP_KEY` (`E`) now toggles —
+  a second press closes the panel immediately instead of re-checking
+  proximity, without touching the underlying interact/pickup request
+  (still fires every press, unchanged). Both existing interactables
+  (`runestone`, `blacksmith`) already had `dialog` text from step 8, so
+  no new content was needed to test this.
 10. [ ] Forging UI, triggered by a blacksmith-kind `Interactable` —
   sockets/unsockets now require being in range of that specific NPC (a
   real behavior change from M7's free-anywhere hotkey socketing);

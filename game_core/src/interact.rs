@@ -66,6 +66,22 @@ pub struct InteractOrPickupRequested {
     pub actor: Entity,
 }
 
+/// The nearest `Interactable` within its own `range`, if any — shared by
+/// `interact_or_pickup_system` (server-authoritative effect resolution) and
+/// `client`'s dialog trigger (instant, no-round-trip dialog display per
+/// `DECISIONS.md`'s M8 planning entry). One priority rule implemented once,
+/// so both sides of the "dialog is read locally, effect is a round-trip"
+/// split can never disagree on which `Interactable` is "the" nearest one.
+pub fn nearest_interactable_in_range<'a>(
+    actor_pos: &Position,
+    interactables: impl Iterator<Item = (&'a Position, &'a Interactable)>,
+) -> Option<&'a Interactable> {
+    interactables
+        .filter(|(pos, interactable)| actor_pos.distance(pos) <= interactable.range)
+        .min_by(|(a, _), (b, _)| actor_pos.distance(a).total_cmp(&actor_pos.distance(b)))
+        .map(|(_, interactable)| interactable)
+}
+
 /// Resolves `InteractOrPickupRequested`: the nearest `Interactable` within
 /// its own `range` takes priority — applying its `InteractableLibrary`
 /// effect (if any) to the actor unconditionally (there's no "attacker"
@@ -95,12 +111,9 @@ pub fn interact_or_pickup_system(
             continue;
         };
 
-        let nearest_interactable = interactables
-            .iter()
-            .filter(|(pos, interactable)| actor_pos.distance(pos) <= interactable.range)
-            .min_by(|(a, _), (b, _)| actor_pos.distance(a).total_cmp(&actor_pos.distance(b)));
+        let nearest_interactable = nearest_interactable_in_range(actor_pos, interactables.iter());
 
-        if let Some((_, interactable)) = nearest_interactable {
+        if let Some(interactable) = nearest_interactable {
             if let Some(effect) = library
                 .0
                 .get(&interactable.template_key)
