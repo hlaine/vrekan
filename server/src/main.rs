@@ -34,7 +34,7 @@ use game_core::{
     allocate_stat_point, apply_death_xp_penalty, equip_item, interact_or_pickup_system,
     is_near_interactable_with_panel, learn_skill, reset_xp_on_full_wipe, revive_system,
     skill_cast_system, socket_rune, tick_od_regen, tick_skill_cooldowns, tick_status_effects,
-    unequip_item, unsocket_rune, ActiveEffects, DeltaSeconds, Downed, DroppedLoot,
+    unequip_item, unsocket_rune, ActiveEffects, Currency, DeltaSeconds, Downed, DroppedLoot,
     EffectDefinition, EffectKind, EffectTarget, Enemy, Equipment, Facing,
     InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory, Item, ItemDrop,
     ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving, RuneInventory,
@@ -416,7 +416,7 @@ fn on_client_connected(
         return;
     }
 
-    let (level, stats, points, known_skills, skill_points, inventory, equipment, runes) =
+    let (level, stats, points, known_skills, skill_points, inventory, equipment, runes, currency) =
         match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
             Ok(Some(save)) => {
                 if save.password != auth.character_password {
@@ -433,6 +433,7 @@ fn on_client_connected(
                     save.inventory,
                     save.equipment,
                     save.runes,
+                    save.currency,
                 )
             }
             Ok(None) => {
@@ -446,6 +447,7 @@ fn on_client_connected(
                     inventory: Inventory::default(),
                     equipment: Equipment::default(),
                     runes: RuneInventory::default(),
+                    currency: Currency::default(),
                 };
                 if let Err(error) = persistence::save_character_save(
                     saves_dir,
@@ -468,6 +470,7 @@ fn on_client_connected(
                     save.inventory,
                     save.equipment,
                     save.runes,
+                    save.currency,
                 )
             }
             Err(error) => {
@@ -493,6 +496,7 @@ fn on_client_connected(
             inventory,
             equipment,
             runes,
+            currency,
         ),
         Position { x: 0.0, y: 0.0 },
         Facing::default(),
@@ -548,6 +552,7 @@ type PersistedCharacterData<'w, 's> = Query<
         &'static Inventory,
         &'static Equipment,
         &'static RuneInventory,
+        &'static Currency,
     ),
 >;
 
@@ -581,6 +586,7 @@ fn on_character_disconnected(
         inventory,
         equipment,
         runes,
+        currency,
     )) = characters.get(remove.entity)
     else {
         return;
@@ -616,6 +622,7 @@ fn on_character_disconnected(
         inventory: inventory.clone(),
         equipment: equipment.clone(),
         runes: runes.clone(),
+        currency: *currency,
     };
     if let Err(error) =
         persistence::save_character_save(saves_dir, &game_id.0, character_id.0, &save)

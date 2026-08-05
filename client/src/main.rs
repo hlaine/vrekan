@@ -23,7 +23,7 @@ use content::{
 use game_core::movement::Position;
 use game_core::player::Player;
 use game_core::{
-    nearest_interactable_in_range, xp_required, DeltaSeconds, Downed, DroppedLoot, Enemy,
+    nearest_interactable_in_range, xp_required, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
     EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
     KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stat, Stats, Stunned,
     UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE,
@@ -38,6 +38,7 @@ const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
 const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
 const ITEM_DROP_COLOR: Color = Color::srgb(0.9, 0.8, 0.2);
 const RUNE_DROP_COLOR: Color = Color::srgb(0.6, 0.2, 0.9);
+const CURRENCY_DROP_COLOR: Color = Color::srgb(0.95, 0.75, 0.1);
 const DROP_SPRITE_SIZE: f32 = 16.0;
 
 // Placeholder appearance for a replicated `Interactable` (blacksmith,
@@ -416,6 +417,7 @@ fn init_replicated_item_drops(
         let color = match drop.0 {
             DroppedLoot::Item(_) => ITEM_DROP_COLOR,
             DroppedLoot::Rune(_) => RUNE_DROP_COLOR,
+            DroppedLoot::Currency(_) => CURRENCY_DROP_COLOR,
         };
         commands.entity(entity).insert((
             Sprite::from_color(color, Vec2::splat(DROP_SPRITE_SIZE)),
@@ -658,22 +660,23 @@ type LocalPlayerHud<'w, 's> = Query<
         &'static Health,
         Option<&'static Od>,
         Option<&'static SkillCooldowns>,
+        &'static Currency,
         Has<Downed>,
     ),
 >;
 
-/// Read-only egui HUD: health/od bars, skill cooldowns, and a downed-state
-/// indicator. Skill rows use the existing fixed `1`-`3` hotkeys from M6
-/// (`SKILL_HOTKEYS`) rather than `KnownSkills` — the skill-tree UI that
-/// would ever populate `KnownSkills` with something other than "empty"
-/// doesn't exist yet (see ROADMAP.md's M8 step 6). Nothing here is
-/// clickable, so it doesn't need the input-focus guard `player_input_system`
-/// applies for `inventory_panel_system` below.
+/// Read-only egui HUD: health/od bars, skill cooldowns, currency balance,
+/// and a downed-state indicator. Skill rows use the existing fixed `1`-`3`
+/// hotkeys from M6 (`SKILL_HOTKEYS`) rather than `KnownSkills` — the
+/// skill-tree UI that would ever populate `KnownSkills` with something
+/// other than "empty" doesn't exist yet (see ROADMAP.md's M8 step 6).
+/// Nothing here is clickable, so it doesn't need the input-focus guard
+/// `player_input_system` applies for `inventory_panel_system` below.
 fn hud_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, query: LocalPlayerHud) {
     let Some(entity) = local_player.0 else {
         return;
     };
-    let Ok((health, od, skill_cooldowns, downed)) = query.get(entity) else {
+    let Ok((health, od, skill_cooldowns, currency, downed)) = query.get(entity) else {
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -696,6 +699,7 @@ fn hud_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, query:
                         .text(format!("Od {:.0}/{:.0}", od.current, od.max)),
                 );
             }
+            ui.label(format!("Coins: {}", currency.0));
             if downed {
                 ui.colored_label(egui::Color32::RED, "DOWNED");
             }

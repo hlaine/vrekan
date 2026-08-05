@@ -239,6 +239,21 @@ Claude Code tasks as you start it, not all upfront.
   kill mechanism. Socketing (M7 part 1's `socket_rune`) will gain a
   currency cost; unsocketing stays free/reversible as shipped. Exact
   amounts/scaling deliberately not decided yet.
+  - [x] Currency foundation shipped: `game_core::economy::Currency(u32)`,
+    individual per player, replicated. `DroppedLoot`/`LootKind` gained a
+    `Currency(u32)` variant — a fixed amount per weighted entry, not a
+    random range (payout variance comes from adding several `Currency`
+    entries at different weights, same mechanism as item/rune odds, not
+    a second layer of randomness). Persisted in `CharacterSave` without a
+    `#[serde(default)]` — matches the precedent every earlier field
+    added to that struct already set (old saves regenerate rather than
+    migrate, an accepted cost during active development). HUD shows a
+    "Coins: N" line. Confirmed live: killing enemies with the new
+    `Currency` loot entries (`converted_farmer`/`missionary`) and
+    picking them up increases the HUD count.
+  - [ ] Vendor buy/sell UI, vendor content schema/prices, and the actual
+    forging-cost wiring on `socket_rune` are still not built — this pass
+    was the currency foundation only.
 - [ ] Enemy visual-variant data shape (shared base template + swappable
   sprite field) — see `MECHANICS.md`. Deferred to the same part 2 pass;
   unrelated to forging, just filed under the same milestone.

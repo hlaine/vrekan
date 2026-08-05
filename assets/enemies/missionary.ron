@@ -33,5 +33,6 @@
         (kind: Item("rusty_sword"), weight: 1.0),
         (kind: Item("leather_armor"), weight: 1.0),
         (kind: Rune("crit_shard"), weight: 2.0),
+        (kind: Currency(20), weight: 3.0),
     ],
 )

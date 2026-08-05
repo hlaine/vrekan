@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::economy::Currency;
 use crate::item::{pickup_loot, Inventory, ItemDrop, RuneInventory};
 use crate::movement::Position;
 use crate::status_effect::{ActiveEffects, EffectDefinition};
@@ -131,6 +132,7 @@ pub fn interact_or_pickup_system(
         &Position,
         &mut Inventory,
         &mut RuneInventory,
+        &mut Currency,
         &mut ActiveEffects,
     )>,
     interactables: Query<(&Position, &Interactable)>,
@@ -139,7 +141,8 @@ pub fn interact_or_pickup_system(
     mut commands: Commands,
 ) {
     for event in events.read() {
-        let Ok((actor_pos, mut inventory, mut runes, mut effects)) = actors.get_mut(event.actor)
+        let Ok((actor_pos, mut inventory, mut runes, mut currency, mut effects)) =
+            actors.get_mut(event.actor)
         else {
             continue;
         };
@@ -165,7 +168,7 @@ pub fn interact_or_pickup_system(
         let Some((drop_entity, _, drop)) = nearest_drop else {
             continue;
         };
-        pickup_loot(&mut inventory, &mut runes, drop.0.clone());
+        pickup_loot(&mut inventory, &mut runes, &mut currency, drop.0.clone());
         commands.entity(drop_entity).despawn();
     }
 }
@@ -177,11 +180,12 @@ mod tests {
     use crate::status_effect::{EffectKind, StackMode, Stat};
     use bevy_ecs::system::RunSystemOnce;
 
-    fn actor_bundle() -> (Position, Inventory, RuneInventory, ActiveEffects) {
+    fn actor_bundle() -> (Position, Inventory, RuneInventory, Currency, ActiveEffects) {
         (
             Position { x: 0.0, y: 0.0 },
             Inventory::default(),
             RuneInventory::default(),
+            Currency::default(),
             ActiveEffects::default(),
         )
     }
@@ -265,6 +269,30 @@ mod tests {
         let _ = world.run_system_once(interact_or_pickup_system);
 
         assert_eq!(world.get::<Inventory>(actor).unwrap().0.len(), 1);
+        assert!(world.get_entity(drop).is_err());
+    }
+
+    #[test]
+    fn picks_up_a_currency_drop_and_credits_the_actors_balance() {
+        let mut world = World::new();
+        world.init_resource::<Messages<InteractOrPickupRequested>>();
+        world.init_resource::<InteractableLibrary>();
+
+        let actor = world.spawn(actor_bundle()).id();
+        let drop = world
+            .spawn((
+                Position { x: 5.0, y: 0.0 },
+                ItemDrop(DroppedLoot::Currency(15)),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<InteractOrPickupRequested>>()
+            .write(InteractOrPickupRequested { actor });
+
+        let _ = world.run_system_once(interact_or_pickup_system);
+
+        assert_eq!(world.get::<Currency>(actor).unwrap().0, 15);
         assert!(world.get_entity(drop).is_err());
     }
 

@@ -62,6 +62,7 @@ fn full_chance() -> f32 {
 pub enum LootKindTemplate {
     Item(String),
     Rune(String),
+    Currency(u32),
 }
 
 /// RON-facing mirror of `game_core::LootEntry`.
@@ -77,6 +78,7 @@ impl LootEntryTemplate {
             kind: match self.kind {
                 LootKindTemplate::Item(template_key) => LootKind::Item(template_key),
                 LootKindTemplate::Rune(rune_key) => LootKind::Rune(rune_key),
+                LootKindTemplate::Currency(amount) => LootKind::Currency(amount),
             },
             weight: self.weight,
         }

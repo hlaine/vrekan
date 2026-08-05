@@ -1,4 +1,5 @@
 pub mod combat;
+pub mod economy;
 pub mod enemy;
 pub mod interact;
 pub mod item;
@@ -12,6 +13,7 @@ pub mod status_effect;
 pub use combat::{
     AttackRequested, AttackTimer, CombatStats, DamageType, Health, MeleeAttack, Resistances,
 };
+pub use economy::Currency;
 pub use enemy::{Aggro, Enemy, EnemyKind};
 pub use interact::{
     interact_or_pickup_system, is_near_interactable_with_panel, nearest_interactable_in_range,

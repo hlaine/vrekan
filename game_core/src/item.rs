@@ -4,6 +4,7 @@ use bevy_ecs::prelude::*;
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
+use crate::economy::Currency;
 use crate::status_effect::Stat;
 
 /// Which equipment slot an item template goes into — matches the two
@@ -113,13 +114,14 @@ impl Equipment {
 pub struct RuneInventory(pub HashMap<String, u32>);
 
 /// What a loot roll produced — an item (with sockets sized from its
-/// template) or a stack-eligible rune, spawned into the world as an
-/// `ItemDrop` and merged into the picker's `Inventory`/`RuneInventory` on
-/// pickup.
+/// template), a stack-eligible rune, or a flat amount of `Currency` —
+/// spawned into the world as an `ItemDrop` and merged into the picker's
+/// `Inventory`/`RuneInventory`/`Currency` on pickup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DroppedLoot {
     Item(Item),
     Rune(String),
+    Currency(u32),
 }
 
 /// A world-visible dropped item/rune, picked up via `PickupItemInput` —
@@ -127,14 +129,20 @@ pub enum DroppedLoot {
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ItemDrop(pub DroppedLoot);
 
-/// One weighted entry in a `LootTable` — either an item or a rune template
-/// key. Resolved against `ItemLibrary` at roll time (see `roll_loot`), not
-/// pre-resolved, since a `LootTable` is authored once per enemy template
-/// but a rolled `Item`'s sockets need to be sized fresh each drop.
+/// One weighted entry in a `LootTable` — an item/rune template key, or a
+/// flat `Currency` amount. Resolved against `ItemLibrary` at roll time
+/// (see `roll_loot`), not pre-resolved, since a `LootTable` is authored
+/// once per enemy template but a rolled `Item`'s sockets need to be sized
+/// fresh each drop. `Currency` carries a fixed amount, not a random
+/// range — a content author wanting payout variance just adds several
+/// `Currency` entries at different weights/amounts, the same way varied
+/// item/rune odds already work, rather than a second layer of randomness
+/// nested inside one entry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LootKind {
     Item(String),
     Rune(String),
+    Currency(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,6 +195,7 @@ pub fn roll_loot(
                     })
                 }
                 LootKind::Rune(rune_key) => DroppedLoot::Rune(rune_key.clone()),
+                LootKind::Currency(amount) => DroppedLoot::Currency(*amount),
             });
         }
         roll -= entry.weight;
@@ -194,13 +203,19 @@ pub fn roll_loot(
     None
 }
 
-/// Merges a dropped loot into the picker's inventory/rune counts — an
-/// item goes onto the (unbounded, for now) inventory list, a rune
-/// increments its stack count.
-pub fn pickup_loot(inventory: &mut Inventory, runes: &mut RuneInventory, loot: DroppedLoot) {
+/// Merges a dropped loot into the picker's inventory/rune counts/currency
+/// balance — an item goes onto the (unbounded, for now) inventory list, a
+/// rune increments its stack count, currency adds onto the balance.
+pub fn pickup_loot(
+    inventory: &mut Inventory,
+    runes: &mut RuneInventory,
+    currency: &mut Currency,
+    loot: DroppedLoot,
+) {
     match loot {
         DroppedLoot::Item(item) => inventory.0.push(item),
         DroppedLoot::Rune(rune_id) => *runes.0.entry(rune_id).or_insert(0) += 1,
+        DroppedLoot::Currency(amount) => currency.0 += amount,
     }
 }
 
@@ -549,28 +564,45 @@ mod tests {
     }
 
     #[test]
-    fn pickup_loot_pushes_items_and_increments_rune_counts() {
+    fn pickup_loot_pushes_items_increments_rune_counts_and_adds_currency() {
         let mut inventory = Inventory::default();
         let mut runes = RuneInventory::default();
+        let mut currency = Currency::default();
 
         pickup_loot(
             &mut inventory,
             &mut runes,
+            &mut currency,
             DroppedLoot::Item(item("sword", 0)),
         );
         pickup_loot(
             &mut inventory,
             &mut runes,
+            &mut currency,
             DroppedLoot::Rune("crit_shard".to_string()),
         );
         pickup_loot(
             &mut inventory,
             &mut runes,
+            &mut currency,
             DroppedLoot::Rune("crit_shard".to_string()),
+        );
+        pickup_loot(
+            &mut inventory,
+            &mut runes,
+            &mut currency,
+            DroppedLoot::Currency(15),
+        );
+        pickup_loot(
+            &mut inventory,
+            &mut runes,
+            &mut currency,
+            DroppedLoot::Currency(10),
         );
 
         assert_eq!(inventory.0.len(), 1);
         assert_eq!(runes.0["crit_shard"], 2);
+        assert_eq!(currency.0, 25);
     }
 
     #[test]
@@ -620,7 +652,7 @@ mod tests {
 
         match loot {
             DroppedLoot::Item(item) => assert_eq!(item.sockets, vec![None, None, None]),
-            DroppedLoot::Rune(_) => panic!("expected an item"),
+            DroppedLoot::Rune(_) | DroppedLoot::Currency(_) => panic!("expected an item"),
         }
     }
 
@@ -639,6 +671,24 @@ mod tests {
         assert_eq!(
             roll_loot(&table, &items, &mut rng),
             Some(DroppedLoot::Rune("crit_shard".to_string()))
+        );
+    }
+
+    #[test]
+    fn roll_loot_always_produces_the_fixed_amount_from_a_single_currency_entry_table() {
+        let table = LootTable {
+            drop_chance: 1.0,
+            entries: vec![LootEntry {
+                kind: LootKind::Currency(15),
+                weight: 1.0,
+            }],
+        };
+        let items = ItemLibrary::default();
+        let mut rng = rand::rng();
+
+        assert_eq!(
+            roll_loot(&table, &items, &mut rng),
+            Some(DroppedLoot::Currency(15))
         );
     }
 }

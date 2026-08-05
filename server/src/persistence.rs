@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use game_core::{
-    Equipment, Inventory, KnownSkills, Level, RuneInventory, Stats, UnspentSkillPoints,
+    Currency, Equipment, Inventory, KnownSkills, Level, RuneInventory, Stats, UnspentSkillPoints,
     UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ pub struct CharacterSave {
     pub inventory: Inventory,
     pub equipment: Equipment,
     pub runes: RuneInventory,
+    pub currency: Currency,
 }
 
 /// Mirrors `content::ContentError`'s shape — this is the same kind of
@@ -206,6 +207,7 @@ mod tests {
             inventory: Inventory::default(),
             equipment: Equipment::default(),
             runes: RuneInventory::default(),
+            currency: Currency(50),
         };
 
         save_character_save(&dir, "some_game", 777, &save).unwrap();
@@ -215,6 +217,7 @@ mod tests {
 
         assert_eq!(loaded.password, "correct-horse");
         assert_eq!(loaded.level, Level { level: 3, xp: 42.0 });
+        assert_eq!(loaded.currency, Currency(50));
         fs::remove_dir_all(&dir).unwrap();
     }
 
