@@ -126,6 +126,22 @@ system from the loot/forging pipeline in `DESIGN.md`/M7, sharing the same
 underlying `Item` data but adding a currency field to `PlayerState` and
 vendor-specific content templates (inventory, prices — tuning data, RON).
 
+## Rune/shard combination (future system, not yet scoped into a milestone)
+
+Lower-tier runes/shards can be combined into a smaller number of more
+powerful ones, across several tiers/levels. Performed at an NPC with the
+ability to combine — both blacksmiths and a new NPC type, **sejdrs** —
+at a currency cost that scales quadratically per combination level (each
+tier costs roughly the square of the previous tier's cost; exact curve
+not decided). Raised alongside M7 part 2's currency planning (see
+`DECISIONS.md`) but deliberately not designed in enough detail to
+implement yet — no rune-tier data shape, combination ratios, or per-NPC
+capability split decided. Noted here so the current rune/socket model
+(`RuneLibrary`, `RuneInventory` — see M7 part 1) doesn't accidentally
+close off supporting it later: both are already open, data-keyed shapes
+(new rune ids/tiers are content, not engine changes), so no current
+design conflicts with this.
+
 ## NPCs
 
 - **Special characters (objective-givers)**: one-way text only — an NPC
@@ -137,6 +153,10 @@ vendor-specific content templates (inventory, prices — tuning data, RON).
   Needs an explicit marker (e.g. a `Neutral` or `Untargetable` component)
   distinct from normal enemy/player combat eligibility.
 - **Vendors** are a specific case of NPC — see Economy above.
+- **Sejdrs** are a specific case of NPC dedicated to rune/shard
+  combination — see Rune/shard combination above. Blacksmiths also gain
+  this ability per that section; a sejdr isn't a blacksmith reskin, it's
+  a distinct NPC type that happens to share the one capability.
 
 ## Enemy visual variants
 

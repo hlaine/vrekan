@@ -1186,3 +1186,13 @@ into the socketing stuff later," not decided yet.
 currency amount for socketing, vendor price shape/content schema, and
 whether currency needs its own HUD display before or alongside the vendor
 UI.
+
+**Noted in passing, not yet scoped:** the user also raised a future
+rune/shard combination system — lower-tier runes/shards combine into more
+powerful ones across several levels, performed at blacksmiths and a new
+"sejdr" NPC type, at a quadratically-scaling currency cost per level. See
+`MECHANICS.md`'s new "Rune/shard combination" section for the fuller
+(still deliberately underspecified) shape. No design conflict with the
+current `RuneLibrary`/`RuneInventory` model — both are already
+open/data-keyed — so nothing here needs to change to keep this option
+open; recorded purely so it isn't lost before its own design pass.
