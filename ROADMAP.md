@@ -611,9 +611,19 @@ particles have no gameplay effect to authorize or keep in sync).
     visible. This is the same class of bug M8's `EguiPrimaryContextPass`
     issue was; a screenshot alone would not have caught a regression here.
   - [ ] Shadow-casting occluders not added yet (next step).
-- [ ] Status indicators (downed/stunned/leash-warning) redesigned off
+- [x] Status indicators (downed/stunned/leash-warning) redesigned off
   `Sprite.color` onto a gizmo overlay, so the base sprite color is free
-  for the lighting system (and later, real textures) to own.
+  for the lighting system (and later, real textures) to own. Old
+  `player_appearance_system`/`PartySprites` removed entirely (base color
+  was already set once at spawn in `init_replicated_players`/
+  `init_replicated_enemies` — the sprite-recolor pass existed purely for
+  status, nothing else needed it); new `status_indicator_system` draws a
+  colored ring (`gizmos.circle_2d`) with the exact same `Downed` >
+  `Stunned` > leash-warning priority the old code used, immediate-mode
+  like `facing_indicator_system` — no spawned entity, no stale-state risk.
+  **Confirmed live**: player sprite stays its normal color at all times;
+  a yellow ring appears around a stunned player and disappears once the
+  stun wears off.
 - [ ] `bevy_hanabi` added (client-only) for GPU particle effects: sparks/
   glow at torches, placed via a new Tiled object layer, read purely
   client-side (no server involvement — cosmetic only).

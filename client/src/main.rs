@@ -154,6 +154,11 @@ const STUNNED_COLOR: Color = Color::srgb(0.9, 0.85, 0.2);
 const FACING_ARROW_LENGTH: f32 = 24.0;
 const FACING_ARROW_COLOR: Color = Color::WHITE;
 
+// Slightly larger than half the player collider's diameter (32 units), so
+// the status ring `status_indicator_system` draws reads as surrounding the
+// sprite, not overlapping it.
+const STATUS_RING_RADIUS: f32 = 20.0;
+
 // This client's persistent character identity, generated once and reused
 // across runs — not tied to any account system (see DECISIONS.md's
 // identity-model entry). Relative to CWD, matching the project's existing
@@ -309,7 +314,7 @@ fn main() {
                 interaction_trigger_system,
                 sync_transform_system,
                 party_camera_system,
-                player_appearance_system,
+                status_indicator_system,
                 facing_indicator_system,
             )
                 .chain(),
@@ -728,51 +733,56 @@ fn party_camera_system(
     }
 }
 
-type PartySprites<'w, 's> = Query<
-    'w,
-    's,
-    (Entity, &'static mut Sprite, Has<Downed>, Has<Stunned>),
-    Or<(With<Player>, With<RemotePlayer>)>,
->;
+type PartyStatusIndicators<'w, 's> =
+    Query<'w, 's, (Entity, Has<Downed>, Has<Stunned>), Or<(With<Player>, With<RemotePlayer>)>>;
 
-/// Fully recomputes every party member's sprite color each frame, rather
-/// than overlaying a tint on top of whatever color was there before — that
-/// overlay approach can't un-tint a `RemotePlayer` once `Downed` is
-/// removed (ally-revive), since nothing else runs every frame to restore
-/// their base color. `Downed` wins over `Stunned`, which wins over the
-/// leash-warning tint; only the local player gets a leash-warning tint at
-/// all (the boundary itself is enforced server-side, see DESIGN.md's
-/// Camera & movement section — this is cosmetic feedback, not the real HUD
-/// indicator planned for M8). Enemies don't get a `Stunned` tint yet — see
-/// DECISIONS.md for why that's deferred, not an oversight.
-fn player_appearance_system(
+/// Draws a colored ring around any party member currently downed, stunned,
+/// or (local player only) near the leash limit — replaces the old
+/// `Sprite.color`-overwriting `player_appearance_system` (see
+/// `DECISIONS.md`'s M8.5 entry): `bevy_lit`'s lighting, and eventually real
+/// textures, both need to own what `Sprite.color` means, so status can no
+/// longer live there. Gizmos are immediate-mode (redrawn from scratch every
+/// frame from current `Downed`/`Stunned`/leash-distance state), so — like
+/// `facing_indicator_system` — there's no spawned indicator entity or
+/// lifecycle to manage, and no stale-state risk (the exact bug class a
+/// spawned overlay sprite/icon would reintroduce, e.g. failing to un-tint
+/// a `RemotePlayer` once `Downed` is removed on ally-revive). Same
+/// `Downed` > `Stunned` > leash-warning priority the old system used; only
+/// the local player gets a leash-warning ring (the boundary itself is
+/// enforced server-side, see DESIGN.md's Camera & movement section — this
+/// is cosmetic feedback, not the real HUD indicator M8 already built).
+/// Enemies don't get a `Stunned` ring yet — see `DECISIONS.md` for why
+/// that's deferred, not an oversight.
+fn status_indicator_system(
     local_player: Res<LocalPlayer>,
     party: PartyPositions,
-    mut sprites: PartySprites,
+    statuses: PartyStatusIndicators,
+    mut gizmos: Gizmos,
 ) {
     let centroid = party_centroid_and_spread(&party).map(|(centroid, _)| centroid);
     let warning_threshold = (LEASH_DISTANCE / 2.0) * LEASH_WARNING_RATIO;
 
-    for (entity, mut sprite, downed, stunned) in &mut sprites {
-        sprite.color = if downed {
-            DOWNED_COLOR
+    for (entity, downed, stunned) in &statuses {
+        let Ok(position) = party.get(entity) else {
+            continue;
+        };
+        let center = Vec2::new(position.x, position.y);
+
+        let color = if downed {
+            Some(DOWNED_COLOR)
         } else if stunned {
-            STUNNED_COLOR
+            Some(STUNNED_COLOR)
         } else if Some(entity) == local_player.0 {
             let near_leash_limit =
-                centroid
-                    .zip(party.get(entity).ok())
-                    .is_some_and(|(centroid, position)| {
-                        Vec2::new(position.x, position.y).distance(centroid) >= warning_threshold
-                    });
-            if near_leash_limit {
-                PLAYER_LEASH_WARNING_COLOR
-            } else {
-                PLAYER_COLOR
-            }
+                centroid.is_some_and(|centroid| center.distance(centroid) >= warning_threshold);
+            near_leash_limit.then_some(PLAYER_LEASH_WARNING_COLOR)
         } else {
-            REMOTE_PLAYER_COLOR
+            None
         };
+
+        if let Some(color) = color {
+            gizmos.circle_2d(center, STATUS_RING_RADIUS, color);
+        }
     }
 }
 
@@ -780,8 +790,8 @@ fn player_appearance_system(
 /// players and enemies alike, local or remote, with no special-casing.
 /// Gizmos are immediate-mode (redrawn from scratch every frame from
 /// whatever `Position`/`Facing` currently hold), so there's no spawned
-/// indicator entity or lifecycle to manage, and no stale-state risk like
-/// the sprite-tint overlay bug fixed in `player_appearance_system`.
+/// indicator entity or lifecycle to manage, and no stale-state risk —
+/// same reasoning `status_indicator_system` uses for status rings.
 /// Placeholder visualization, not real art — see MECHANICS.md's Combat
 /// section for what `Facing` means.
 fn facing_indicator_system(query: Query<(&Position, &Facing)>, mut gizmos: Gizmos) {
