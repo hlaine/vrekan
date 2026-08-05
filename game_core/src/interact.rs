@@ -15,6 +15,13 @@ use crate::status_effect::{ActiveEffects, EffectDefinition};
 /// precision.
 pub const PICKUP_RANGE: f32 = 50.0;
 
+/// The `opens_panel` value that gates forging to blacksmith-kind
+/// `Interactable`s — a shared identifier between the content file
+/// (`blacksmith.ron`'s `opens_panel: Some("forging")`), the server's
+/// proximity gate (`is_near_interactable_with_panel`), and the client's
+/// panel trigger, so the three can't drift apart into mismatched strings.
+pub const FORGING_PANEL_ID: &str = "forging";
+
 /// A world entity a player can trigger with the interact button (`E`) —
 /// an NPC (blacksmith, sage) or a world object (runestone). Replicated as
 /// just the content-template key + range, not the template's dialog/effect
@@ -34,11 +41,11 @@ pub struct Interactable {
 /// Server-side-only resolution of an `Interactable`'s template — mirrors
 /// `content::InteractableTemplate` but with `effect` already converted to
 /// the engine's `EffectDefinition` (server-only, unlike the wire-safe
-/// `Interactable` component above). `opens_panel` isn't read by
-/// `interact_or_pickup_system` yet — that's M8 step 10's job (gating the
-/// forging panel to a blacksmith-kind `Interactable`); the field exists now
-/// so a content author can write it into a template today rather than
-/// needing a schema migration later.
+/// `Interactable` component above). `opens_panel` gates forging proximity
+/// (see `is_near_interactable_with_panel`, `FORGING_PANEL_ID`) — not read
+/// by `interact_or_pickup_system` itself, since opening a panel is a purely
+/// client-side reaction to the same button press, not a server-resolved
+/// outcome.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InteractableDefinition {
     pub effect: Option<EffectDefinition>,
@@ -80,6 +87,32 @@ pub fn nearest_interactable_in_range<'a>(
         .filter(|(pos, interactable)| actor_pos.distance(pos) <= interactable.range)
         .min_by(|(a, _), (b, _)| actor_pos.distance(a).total_cmp(&actor_pos.distance(b)))
         .map(|(_, interactable)| interactable)
+}
+
+/// Whether `actor_pos` is within range of an `Interactable` whose
+/// `InteractableLibrary` definition has `opens_panel == Some(panel)` — the
+/// server-side proximity gate `apply_socket_rune_input`/
+/// `apply_unsocket_rune_input` use to require being near a blacksmith-kind
+/// `Interactable` (see `FORGING_PANEL_ID`), a real behavior change from
+/// M7's free-anywhere hotkey socketing (see `DECISIONS.md`'s M8 planning
+/// entry). Unlike `nearest_interactable_in_range`, this checks *any*
+/// matching `Interactable` in range, not just the overall nearest one — a
+/// player standing near both a runestone and a blacksmith should still be
+/// able to forge, even though the runestone might be closer.
+pub fn is_near_interactable_with_panel<'a>(
+    actor_pos: &Position,
+    panel: &str,
+    interactables: impl Iterator<Item = (&'a Position, &'a Interactable)>,
+    library: &InteractableLibrary,
+) -> bool {
+    interactables.into_iter().any(|(pos, interactable)| {
+        actor_pos.distance(pos) <= interactable.range
+            && library
+                .0
+                .get(&interactable.template_key)
+                .and_then(|definition| definition.opens_panel.as_deref())
+                == Some(panel)
+    })
 }
 
 /// Resolves `InteractOrPickupRequested`: the nearest `Interactable` within
@@ -367,5 +400,98 @@ mod tests {
 
         assert!(world.get::<ActiveEffects>(actor).unwrap().0.is_empty());
         assert!(world.get::<Inventory>(actor).unwrap().0.is_empty());
+    }
+
+    fn forging_library() -> InteractableLibrary {
+        let mut library = InteractableLibrary::default();
+        library.0.insert(
+            "blacksmith".to_string(),
+            InteractableDefinition {
+                effect: None,
+                opens_panel: Some(FORGING_PANEL_ID.to_string()),
+            },
+        );
+        library.0.insert(
+            "runestone".to_string(),
+            InteractableDefinition {
+                effect: None,
+                opens_panel: None,
+            },
+        );
+        library
+    }
+
+    #[test]
+    fn is_near_interactable_with_panel_true_when_in_range_of_a_matching_interactable() {
+        let actor_pos = Position { x: 0.0, y: 0.0 };
+        let blacksmith_pos = Position { x: 10.0, y: 0.0 };
+        let blacksmith = Interactable {
+            template_key: "blacksmith".to_string(),
+            range: 50.0,
+        };
+
+        assert!(is_near_interactable_with_panel(
+            &actor_pos,
+            FORGING_PANEL_ID,
+            std::iter::once((&blacksmith_pos, &blacksmith)),
+            &forging_library(),
+        ));
+    }
+
+    #[test]
+    fn is_near_interactable_with_panel_false_for_an_in_range_interactable_with_a_different_panel() {
+        let actor_pos = Position { x: 0.0, y: 0.0 };
+        let runestone_pos = Position { x: 10.0, y: 0.0 };
+        let runestone = Interactable {
+            template_key: "runestone".to_string(),
+            range: 50.0,
+        };
+
+        assert!(!is_near_interactable_with_panel(
+            &actor_pos,
+            FORGING_PANEL_ID,
+            std::iter::once((&runestone_pos, &runestone)),
+            &forging_library(),
+        ));
+    }
+
+    #[test]
+    fn is_near_interactable_with_panel_false_when_the_matching_interactable_is_out_of_range() {
+        let actor_pos = Position { x: 0.0, y: 0.0 };
+        let blacksmith_pos = Position { x: 500.0, y: 0.0 };
+        let blacksmith = Interactable {
+            template_key: "blacksmith".to_string(),
+            range: 50.0,
+        };
+
+        assert!(!is_near_interactable_with_panel(
+            &actor_pos,
+            FORGING_PANEL_ID,
+            std::iter::once((&blacksmith_pos, &blacksmith)),
+            &forging_library(),
+        ));
+    }
+
+    #[test]
+    fn is_near_interactable_with_panel_true_when_a_farther_non_matching_interactable_is_also_in_range(
+    ) {
+        let actor_pos = Position { x: 0.0, y: 0.0 };
+        let runestone_pos = Position { x: 5.0, y: 0.0 };
+        let runestone = Interactable {
+            template_key: "runestone".to_string(),
+            range: 50.0,
+        };
+        let blacksmith_pos = Position { x: 40.0, y: 0.0 };
+        let blacksmith = Interactable {
+            template_key: "blacksmith".to_string(),
+            range: 50.0,
+        };
+
+        assert!(is_near_interactable_with_panel(
+            &actor_pos,
+            FORGING_PANEL_ID,
+            [(&runestone_pos, &runestone), (&blacksmith_pos, &blacksmith)].into_iter(),
+            &forging_library(),
+        ));
     }
 }

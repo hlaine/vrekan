@@ -25,8 +25,8 @@ use game_core::player::Player;
 use game_core::{
     nearest_interactable_in_range, xp_required, DeltaSeconds, Downed, DroppedLoot, Enemy,
     EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
-    KnownSkills, Level, Od, SkillCooldowns, Stat, Stats, Stunned, UnspentSkillPoints,
-    UnspentStatPoints, LEASH_DISTANCE,
+    KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stat, Stats, Stunned,
+    UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -74,26 +74,15 @@ const INVENTORY_TOGGLE_KEY: KeyCode = KeyCode::KeyI;
 /// `UnspentSkillPoints` have had since M5/M6.
 const CHARACTER_TOGGLE_KEY: KeyCode = KeyCode::KeyC;
 
-/// Sockets/unsockets a rune into the weapon's first socket — hardcoded to
-/// one slot/index and the two rune ids this pass's content actually has,
-/// purely to make the socket/unsocket mechanic reachable and testable
-/// without a real UI; the server-side resolution
-/// (`game_core::socket_rune`/`unsocket_rune`) already supports any
-/// slot/index/rune combination. Stays a hotkey (not a panel) until the
-/// forging UI (M8 step 10) exists — also gated behind the input-focus
-/// guard.
-const SOCKET_CRIT_SHARD_KEY: KeyCode = KeyCode::F7;
-const SOCKET_SWIFT_SHARD_KEY: KeyCode = KeyCode::F8;
-const UNSOCKET_KEY: KeyCode = KeyCode::F9;
-
 // Only used to look up appearance (color/size) for a replicated enemy by
 // its `EnemyKind` — the server is what actually spawns/simulates enemies
 // now (see `server/src/main.rs`'s `spawn_enemies`).
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 
-// Loaded locally purely for `dialog` text lookup by an `Interactable`'s
-// `template_key` — same "server spawns/resolves, client renders" split as
-// `ENEMY_TEMPLATES_DIR`. Read by `dialog_trigger_system` (M8 step 9).
+// Loaded locally purely for `dialog`/`opens_panel` lookup by an
+// `Interactable`'s `template_key` — same "server spawns/resolves, client
+// renders" split as `ENEMY_TEMPLATES_DIR`. Read by
+// `interaction_trigger_system`.
 const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
 
 // Relative to the assets root (loaded via AssetServer), not the filesystem
@@ -171,19 +160,30 @@ struct CharacterPanelOpen(bool);
 #[derive(Resource)]
 struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
 
-/// Interactable templates loaded purely for `dialog` text lookup by an
-/// `Interactable`'s `template_key` — see `INTERACTABLE_TEMPLATES_DIR`'s doc
-/// comment.
+/// Interactable templates loaded purely for `dialog`/`opens_panel` lookup
+/// by an `Interactable`'s `template_key` — see `INTERACTABLE_TEMPLATES_DIR`'s
+/// doc comment.
 #[derive(Resource)]
 struct InteractableTemplates(Vec<(String, InteractableTemplate)>);
 
-/// Currently-displayed dialog panel text, if any — set by
-/// `dialog_trigger_system` when the interact button is pressed near an
-/// `Interactable` whose template has `dialog` text, cleared by egui's own
-/// window close button (`dialog_panel_system`). `None` means the panel is
-/// hidden.
+/// Which panel `interaction_trigger_system` opened, if any: a runestone-style
+/// plain-text dialog, or the forging UI (gated to blacksmith-kind
+/// `Interactable`s server-side, see `game_core::FORGING_PANEL_ID`) — one
+/// button (`PICKUP_KEY`) resolves to at most one of these per press, same
+/// priority-with-no-double-trigger shape as `interact_or_pickup_system`'s
+/// interactable-vs-pickup split.
+#[derive(Clone, PartialEq)]
+enum InteractionPanelKind {
+    Dialog(String),
+    Forging,
+}
+
+/// Currently-open interaction panel, if any — set by
+/// `interaction_trigger_system`, cleared either by egui's own window close
+/// button (`dialog_panel_system`/`forging_panel_system`) or by pressing
+/// `PICKUP_KEY` again while it's open. `None` means no panel is shown.
 #[derive(Resource, Default)]
-struct DialogPanel(Option<String>);
+struct InteractionPanel(Option<InteractionPanelKind>);
 
 fn main() {
     App::new()
@@ -214,7 +214,7 @@ fn main() {
         .init_resource::<LocalPlayer>()
         .init_resource::<InventoryOpen>()
         .init_resource::<CharacterPanelOpen>()
-        .init_resource::<DialogPanel>()
+        .init_resource::<InteractionPanel>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
@@ -225,7 +225,7 @@ fn main() {
                 init_replicated_item_drops,
                 init_replicated_interactables,
                 player_input_system,
-                dialog_trigger_system,
+                interaction_trigger_system,
                 sync_transform_system,
                 party_camera_system,
                 player_appearance_system,
@@ -249,6 +249,7 @@ fn main() {
                 inventory_panel_system,
                 character_panel_system,
                 dialog_panel_system,
+                forging_panel_system,
             )
                 .chain(),
         )
@@ -456,8 +457,6 @@ fn player_input_system(
     mut revive_input: MessageWriter<ReviveInput>,
     mut cast_skill_input: MessageWriter<CastSkillInput>,
     mut pickup_input: MessageWriter<PickupItemInput>,
-    mut socket_rune_input: MessageWriter<SocketRuneInput>,
-    mut unsocket_rune_input: MessageWriter<UnsocketRuneInput>,
     mut character_panel_open: ResMut<CharacterPanelOpen>,
 ) {
     if local_player.0.is_none() {
@@ -525,27 +524,6 @@ fn player_input_system(
 
     if keyboard.just_pressed(PICKUP_KEY) {
         pickup_input.write(PickupItemInput);
-    }
-
-    if keyboard.just_pressed(SOCKET_CRIT_SHARD_KEY) {
-        socket_rune_input.write(SocketRuneInput {
-            slot: EquipSlot::Weapon,
-            socket_index: 0,
-            rune_id: "crit_shard".to_string(),
-        });
-    }
-    if keyboard.just_pressed(SOCKET_SWIFT_SHARD_KEY) {
-        socket_rune_input.write(SocketRuneInput {
-            slot: EquipSlot::Weapon,
-            socket_index: 0,
-            rune_id: "swift_shard".to_string(),
-        });
-    }
-    if keyboard.just_pressed(UNSOCKET_KEY) {
-        unsocket_rune_input.write(UnsocketRuneInput {
-            slot: EquipSlot::Weapon,
-            socket_index: 0,
-        });
     }
 }
 
@@ -947,31 +925,35 @@ fn character_panel_system(
     }
 }
 
-/// Triggers the dialog panel: on `PICKUP_KEY`, finds the nearest in-range
-/// `Interactable` via `game_core::nearest_interactable_in_range` — the same
-/// priority rule `server::interact_or_pickup_system` uses for the real
-/// effect grant, shared rather than duplicated so the two can never
-/// disagree on which `Interactable` is "the" nearest one — and, if its
-/// template has `dialog` text, shows it. Purely a local read of
-/// already-replicated data, no round-trip (see `DECISIONS.md`'s M8
-/// planning entry). Gated behind the same input-focus guard as every other
-/// non-protected hotkey (see `player_input_system`).
+/// Triggers whichever interaction panel applies: on `PICKUP_KEY`, finds the
+/// nearest in-range `Interactable` via `game_core::nearest_interactable_in_range`
+/// — the same priority rule `server::interact_or_pickup_system` uses for
+/// the real effect grant, shared rather than duplicated so the two can
+/// never disagree on which `Interactable` is "the" nearest one. A
+/// `FORGING_PANEL_ID` template opens the forging UI; otherwise, `dialog`
+/// text (if any) opens the plain-text dialog. Both are purely local reads
+/// of already-replicated data, no round-trip (see `DECISIONS.md`'s M8
+/// planning entry) — the forging UI's actual socket/unsocket actions are
+/// still a real round-trip, gated server-side by
+/// `game_core::is_near_interactable_with_panel`. Gated behind the same
+/// input-focus guard as every other non-protected hotkey (see
+/// `player_input_system`).
 ///
-/// `PICKUP_KEY` toggles: if the panel is already open, the next press just
+/// `PICKUP_KEY` toggles: if a panel is already open, the next press just
 /// closes it rather than re-checking proximity — a quick one-key dismiss
 /// for when it pops up mid-fight (e.g. picking up loot in range of a
-/// dialog `Interactable`), not just the window's own mouse-driven close
+/// dialog `Interactable`), not just a window's own mouse-driven close
 /// button. The underlying interact/pickup request still fires every press
 /// regardless (see `player_input_system`) — this only toggles the local
-/// dialog overlay, not the server-resolved action.
-fn dialog_trigger_system(
+/// panel, not the server-resolved action.
+fn interaction_trigger_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     egui_wants_input: Res<EguiWantsInput>,
     local_player: Res<LocalPlayer>,
     positions: Query<&Position>,
     interactables: Query<(&Position, &Interactable)>,
     templates: Res<InteractableTemplates>,
-    mut dialog_panel: ResMut<DialogPanel>,
+    mut interaction_panel: ResMut<InteractionPanel>,
 ) {
     if egui_wants_input.wants_keyboard_input() {
         return;
@@ -979,8 +961,8 @@ fn dialog_trigger_system(
     if !keyboard.just_pressed(PICKUP_KEY) {
         return;
     }
-    if dialog_panel.0.is_some() {
-        dialog_panel.0 = None;
+    if interaction_panel.0.is_some() {
+        interaction_panel.0 = None;
         return;
     }
     let Some(entity) = local_player.0 else {
@@ -999,16 +981,21 @@ fn dialog_trigger_system(
     else {
         return;
     };
-    if let Some(dialog) = &template.dialog {
-        dialog_panel.0 = Some(dialog.clone());
+    if template.opens_panel.as_deref() == Some(FORGING_PANEL_ID) {
+        interaction_panel.0 = Some(InteractionPanelKind::Forging);
+    } else if let Some(dialog) = &template.dialog {
+        interaction_panel.0 = Some(InteractionPanelKind::Dialog(dialog.clone()));
     }
 }
 
-/// Read-only dialog window showing whatever `DialogPanel` currently holds;
+/// Read-only dialog window shown when `InteractionPanel` holds `Dialog`;
 /// closed via egui's own close button, which clears it back to `None`. No
 /// text input, so (like the HUD) doesn't need the input-focus guard.
-fn dialog_panel_system(mut contexts: EguiContexts, mut dialog_panel: ResMut<DialogPanel>) {
-    let Some(text) = dialog_panel.0.clone() else {
+fn dialog_panel_system(
+    mut contexts: EguiContexts,
+    mut interaction_panel: ResMut<InteractionPanel>,
+) {
+    let Some(InteractionPanelKind::Dialog(text)) = interaction_panel.0.clone() else {
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -1020,6 +1007,125 @@ fn dialog_panel_system(mut contexts: EguiContexts, mut dialog_panel: ResMut<Dial
         ui.label(text);
     });
     if !open {
-        dialog_panel.0 = None;
+        interaction_panel.0 = None;
+    }
+}
+
+/// One row per socket: filled sockets get an "Unsocket" button; empty ones
+/// get one "Socket <rune_id> (xN)" button per rune the player actually has
+/// in stock (`RuneInventory`) — reads real rune ids straight off replicated
+/// data rather than a hardcoded list, so a new rune template needs no
+/// client change to become forgeable. Rune ids are sorted for a stable
+/// button order (`RuneInventory`'s `HashMap` iteration order isn't
+/// otherwise guaranteed frame-to-frame).
+fn socket_row(
+    ui: &mut egui::Ui,
+    slot: EquipSlot,
+    socket_index: usize,
+    socket: &Option<String>,
+    runes: &RuneInventory,
+    socket_clicked: &mut Option<(EquipSlot, usize, String)>,
+    unsocket_clicked: &mut Option<(EquipSlot, usize)>,
+) {
+    ui.horizontal(|ui| match socket {
+        Some(rune_id) => {
+            ui.label(format!("Socket {socket_index}: {rune_id}"));
+            if ui.button("Unsocket").clicked() {
+                *unsocket_clicked = Some((slot, socket_index));
+            }
+        }
+        None => {
+            ui.label(format!("Socket {socket_index}: (empty)"));
+            let mut rune_ids: Vec<_> = runes.0.iter().filter(|(_, count)| **count > 0).collect();
+            rune_ids.sort_by_key(|(rune_id, _)| rune_id.as_str());
+            for (rune_id, count) in rune_ids {
+                if ui.button(format!("{rune_id} (x{count})")).clicked() {
+                    *socket_clicked = Some((slot, socket_index, rune_id.clone()));
+                }
+            }
+        }
+    });
+}
+
+/// Forging panel: shown when `InteractionPanel` holds `Forging` (opened by
+/// `interaction_trigger_system` near a blacksmith-kind `Interactable`).
+/// Lists each equipped item's sockets with socket/unsocket buttons —
+/// replaces M7's `F7`/`F8`/`F9` hotkey stand-ins (removed now that the
+/// panel exists, per `ROADMAP.md`, same precedent as the inventory panel
+/// replacing `F1`-`F6`). The actual socket/unsocket is still a server
+/// round-trip, proximity-gated there too (`is_near_interactable_with_panel`)
+/// — this panel can be left open while walking away, at which point those
+/// requests just silently no-op, same "invalid action, no client-side
+/// feedback yet" treatment every other action system already has.
+fn forging_panel_system(
+    mut contexts: EguiContexts,
+    local_player: Res<LocalPlayer>,
+    mut interaction_panel: ResMut<InteractionPanel>,
+    query: Query<(&Equipment, &RuneInventory)>,
+    mut socket_input: MessageWriter<SocketRuneInput>,
+    mut unsocket_input: MessageWriter<UnsocketRuneInput>,
+) {
+    if !matches!(interaction_panel.0, Some(InteractionPanelKind::Forging)) {
+        return;
+    }
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok((equipment, runes)) = query.get(entity) else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut open = true;
+    let mut socket_clicked = None;
+    let mut unsocket_clicked = None;
+
+    egui::Window::new("Forging")
+        .open(&mut open)
+        .show(ctx, |ui| {
+            for (label, slot, item) in [
+                ("Weapon", EquipSlot::Weapon, &equipment.weapon),
+                ("Armor", EquipSlot::Armor, &equipment.armor),
+                ("Helmet", EquipSlot::Helmet, &equipment.helmet),
+            ] {
+                ui.heading(label);
+                match item {
+                    Some(item) => {
+                        for (socket_index, socket) in item.sockets.iter().enumerate() {
+                            socket_row(
+                                ui,
+                                slot,
+                                socket_index,
+                                socket,
+                                runes,
+                                &mut socket_clicked,
+                                &mut unsocket_clicked,
+                            );
+                        }
+                    }
+                    None => {
+                        ui.label("(nothing equipped)");
+                    }
+                }
+                ui.separator();
+            }
+        });
+
+    // Deferred until after `show` closes — same reason as
+    // `inventory_panel_system`'s deferred writes.
+    if let Some((slot, socket_index, rune_id)) = socket_clicked {
+        socket_input.write(SocketRuneInput {
+            slot,
+            socket_index,
+            rune_id,
+        });
+    }
+    if let Some((slot, socket_index)) = unsocket_clicked {
+        unsocket_input.write(UnsocketRuneInput { slot, socket_index });
+    }
+    if !open {
+        interaction_panel.0 = None;
     }
 }

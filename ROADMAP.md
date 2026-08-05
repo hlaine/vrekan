@@ -247,10 +247,10 @@ pass just to add a rune type for it.
 
 ## M8 — UI: HUD & menus
 
-Part 1 (in progress — see `DECISIONS.md`'s M8 planning entry for the full
-design writeup). Numbered here by practical build order, not importance —
-later steps depend on earlier ones landing first; a review pass before
-starting found two gaps folded in below (marked "found via review").
+Part 1 (done — see `DECISIONS.md`'s M8 planning entry for the full design
+writeup). Numbered here by practical build order, not importance — later
+steps depend on earlier ones landing first; a review pass before starting
+found two gaps folded in below (marked "found via review").
 
 1. [x] `bevy_egui` added as a client-only dependency (named in `CLAUDE.md`'s
   stack from the start; `=0.41.1`, verified compatible with the pinned
@@ -452,11 +452,36 @@ starting found two gaps folded in below (marked "found via review").
   (still fires every press, unchanged). Both existing interactables
   (`runestone`, `blacksmith`) already had `dialog` text from step 8, so
   no new content was needed to test this.
-10. [ ] Forging UI, triggered by a blacksmith-kind `Interactable` —
+10. [x] Forging UI, triggered by a blacksmith-kind `Interactable` —
   sockets/unsockets now require being in range of that specific NPC (a
   real behavior change from M7's free-anywhere hotkey socketing);
   `apply_socket_rune_input`/`apply_unsocket_rune_input` gain a
   server-side proximity check, not just a plain range constant.
+  New `game_core::is_near_interactable_with_panel` + `FORGING_PANEL_ID`
+  shared constant: same "one helper, not duplicated logic" precedent as
+  step 9's `nearest_interactable_in_range`, checking *any* in-range
+  `Interactable` whose library definition has the matching `opens_panel`
+  (not just the nearest one overall — a player near both a runestone and
+  the blacksmith should still be able to forge). `client`'s `DialogPanel`
+  generalized into `InteractionPanel` (`Dialog(String)` or `Forging`),
+  since one button/one trigger system now resolves to at most one of the
+  two. New `forging_panel_system` lists each equipped slot's sockets;
+  empty ones offer one button per rune actually in the player's
+  `RuneInventory` (read live off replicated data, not a hardcoded rune
+  list) — removed the `F7`/`F8`/`F9` hotkey stand-ins now that the panel
+  covers the same ground, same precedent as the inventory panel replacing
+  `F1`-`F6`. **Confirmed live:** equip a socketed weapon, open the panel
+  at the blacksmith, socket and unsocket a rune, and confirm socketing is
+  silently rejected out of range. Testing surfaced two gaps addressed
+  along the way, both live-tested themselves: enemies weren't dropping
+  loot to test with, so `server::spawn_starter_loot` seeds a socketed
+  `rusty_sword` + one `crit_shard`/`swift_shard` rune near the map
+  midpoint between the runestone and blacksmith — the user asked to keep
+  this permanently rather than strip it as a one-off test aid, but only
+  once per new game (gated on the same new-vs-existing-game save check
+  `load_game_password` already makes), not every restart, since an
+  unconditional Startup spawn would otherwise pile up duplicate loot on
+  every server restart of an already-running game.
 
 Deferred (see `DECISIONS.md` for why — blocked on weapon-driven combat
 stats not existing yet, not a UI-only gap):

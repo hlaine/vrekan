@@ -32,13 +32,14 @@ use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
     allocate_stat_point, apply_death_xp_penalty, equip_item, interact_or_pickup_system,
-    learn_skill, reset_xp_on_full_wipe, revive_system, skill_cast_system, socket_rune,
-    tick_od_regen, tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune,
-    ActiveEffects, DeltaSeconds, Downed, EffectDefinition, EffectKind, EffectTarget, Enemy,
-    Equipment, Facing, InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory,
-    ItemDrop, ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving,
-    RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat,
-    Stats, Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity,
+    is_near_interactable_with_panel, learn_skill, reset_xp_on_full_wipe, revive_system,
+    skill_cast_system, socket_rune, tick_od_regen, tick_skill_cooldowns, tick_status_effects,
+    unequip_item, unsocket_rune, ActiveEffects, DeltaSeconds, Downed, DroppedLoot,
+    EffectDefinition, EffectKind, EffectTarget, Enemy, Equipment, Facing,
+    InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory, Item, ItemDrop,
+    ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving, RuneInventory,
+    RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned,
+    UnspentSkillPoints, UnspentStatPoints, Velocity, FORGING_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -162,6 +163,7 @@ fn main() {
                 spawn_map_colliders,
                 spawn_enemies,
                 spawn_interactables,
+                spawn_starter_loot,
             ),
         )
         .add_systems(
@@ -693,6 +695,44 @@ fn spawn_enemies(mut commands: Commands) {
     }
 }
 
+/// Starter loot: a socketed weapon and one of each rune, spawned once per
+/// new game (not on every restart of an existing one — see below) so a
+/// fresh character has something to forge with straight away rather than
+/// grinding enemy kills first — confirmed as wanted, kept rather than
+/// stripped out as a one-off test aid (see `ROADMAP.md`'s M8 step 10
+/// entry). Placed at the midpoint between the runestone and blacksmith
+/// (x=100/x=540), safely outside either's 60-unit interact range so `E`
+/// there always picks up rather than interacting.
+///
+/// Gated on the same new-vs-existing-game check `load_game_password` makes
+/// (a fresh disk read, not a shared resource, to avoid a Startup-ordering
+/// dependency between the two): without it, every server restart of an
+/// already-running game would spawn three more drops on top of whatever's
+/// still there, an unbounded pile-up rather than a one-time bootstrap.
+fn spawn_starter_loot(mut commands: Commands, game_id: Res<GameId>) {
+    let existing_save = persistence::load_game_save(Path::new(SAVES_DIR), &game_id.0)
+        .unwrap_or_else(|error| panic!("failed to load game save: {error}"));
+    if existing_save.is_some() {
+        return;
+    }
+
+    commands.spawn((
+        Position { x: 300.0, y: 30.0 },
+        ItemDrop(DroppedLoot::Item(Item {
+            template_key: "rusty_sword".to_string(),
+            sockets: vec![None, None],
+        })),
+    ));
+    commands.spawn((
+        Position { x: 320.0, y: 30.0 },
+        ItemDrop(DroppedLoot::Rune("crit_shard".to_string())),
+    ));
+    commands.spawn((
+        Position { x: 340.0, y: 30.0 },
+        ItemDrop(DroppedLoot::Rune("swift_shard".to_string())),
+    ));
+}
+
 /// Tags a freshly-spawned `ItemDrop` (see `combat::death_system`'s loot
 /// roll) with `Replicated` — `game_core` has no `bevy_replicon` dependency
 /// (see `CLAUDE.md`'s crate boundaries), so it can't insert this marker
@@ -959,19 +999,33 @@ fn apply_unequip_input(
 /// Turns a client's `SocketRuneInput` into `game_core::socket_rune`'s
 /// resolution — a no-op (see that function's doc comment) for any
 /// untrusted-input case: unknown rune, empty stack, missing item, bad
-/// socket index, or an already-occupied socket.
+/// socket index, or an already-occupied socket. Also a no-op if the actor
+/// isn't in range of a blacksmith-kind `Interactable` (`FORGING_PANEL_ID`)
+/// — a real behavior change from M7's free-anywhere hotkey stand-in (see
+/// `DECISIONS.md`'s M8 planning entry), enforced here rather than trusting
+/// the client to only send this while its forging panel is open.
 fn apply_socket_rune_input(
     mut inputs: MessageReader<FromClient<SocketRuneInput>>,
-    mut players: Query<(&mut Equipment, &mut RuneInventory)>,
+    mut players: Query<(&Position, &mut Equipment, &mut RuneInventory)>,
+    interactables: Query<(&Position, &Interactable)>,
+    interactable_library: Res<InteractableLibrary>,
     runes: Res<RuneLibrary>,
 ) {
     for input in inputs.read() {
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
+        let Ok((actor_pos, mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
             continue;
         };
+        if !is_near_interactable_with_panel(
+            actor_pos,
+            FORGING_PANEL_ID,
+            interactables.iter(),
+            &interactable_library,
+        ) {
+            continue;
+        }
         socket_rune(
             &mut equipment,
             &mut rune_inventory,
@@ -984,18 +1038,29 @@ fn apply_socket_rune_input(
 }
 
 /// Turns a client's `UnsocketRuneInput` into `game_core::unsocket_rune`'s
-/// resolution — free and reversible (see DECISIONS.md).
+/// resolution — free and reversible (see DECISIONS.md). Gated behind the
+/// same forging-proximity check as `apply_socket_rune_input`.
 fn apply_unsocket_rune_input(
     mut inputs: MessageReader<FromClient<UnsocketRuneInput>>,
-    mut players: Query<(&mut Equipment, &mut RuneInventory)>,
+    mut players: Query<(&Position, &mut Equipment, &mut RuneInventory)>,
+    interactables: Query<(&Position, &Interactable)>,
+    interactable_library: Res<InteractableLibrary>,
 ) {
     for input in inputs.read() {
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
+        let Ok((actor_pos, mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
             continue;
         };
+        if !is_near_interactable_with_panel(
+            actor_pos,
+            FORGING_PANEL_ID,
+            interactables.iter(),
+            &interactable_library,
+        ) {
+            continue;
+        }
         unsocket_rune(
             &mut equipment,
             &mut rune_inventory,
