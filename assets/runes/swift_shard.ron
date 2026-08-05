@@ -1,4 +1,5 @@
 (
     stat: MoveSpeed,
     magnitude: 15.0,
+    socket_cost: 15,
 )

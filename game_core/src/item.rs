@@ -46,10 +46,14 @@ pub struct ItemLibrary(pub HashMap<String, ItemDefinition>);
 /// socketed, not a timed `StatModifier` effect (see `Equipment::stat_bonus`
 /// for how it's summed at point-of-use, same "never bake a buff into the
 /// base stat" principle `ActiveEffects::stat_bonus` already established).
+/// `socket_cost` is the `Currency` price `socket_rune` charges to socket
+/// this rune — unsocketing stays free/reversible (see `DECISIONS.md`'s M7
+/// part 2 planning entry), so only this direction needs a price at all.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RuneDefinition {
     pub stat: Stat,
     pub magnitude: f32,
+    pub socket_cost: u32,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
@@ -255,8 +259,10 @@ pub fn unequip_item(inventory: &mut Inventory, equipment: &mut Equipment, slot: 
 }
 
 /// Socket a rune from `runes` into `equipment[slot]`'s socket at
-/// `socket_index`, consuming one from the stack. Rejects (returns `false`,
-/// no state changed) an unknown rune id, an empty stack, a missing
+/// `socket_index`, consuming one from the stack and charging its
+/// `RuneDefinition::socket_cost` from `currency`. Rejects (returns
+/// `false`, no state changed — including no currency deducted) an
+/// unknown rune id, insufficient currency, an empty stack, a missing
 /// equipped item at `slot`, an out-of-range socket index, or an
 /// already-occupied socket — all untrusted-input cases, not invariant
 /// violations.
@@ -264,11 +270,15 @@ pub fn socket_rune(
     equipment: &mut Equipment,
     runes: &mut RuneInventory,
     rune_library: &RuneLibrary,
+    currency: &mut Currency,
     slot: EquipSlot,
     socket_index: usize,
     rune_id: &str,
 ) -> bool {
-    if !rune_library.0.contains_key(rune_id) {
+    let Some(definition) = rune_library.0.get(rune_id) else {
+        return false;
+    };
+    if currency.0 < definition.socket_cost {
         return false;
     }
     let Some(count) = runes.0.get_mut(rune_id) else {
@@ -286,6 +296,7 @@ pub fn socket_rune(
     if socket.is_some() {
         return false;
     }
+    currency.0 -= definition.socket_cost;
     *socket = Some(rune_id.to_string());
     *count -= 1;
     true
@@ -321,6 +332,7 @@ mod tests {
         RuneDefinition {
             stat: Stat::CritChance,
             magnitude: 0.05,
+            socket_cost: 10,
         }
     }
 
@@ -423,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn socket_rune_consumes_one_from_the_stack_and_fills_the_socket() {
+    fn socket_rune_consumes_one_from_the_stack_fills_the_socket_and_charges_currency() {
         let mut equipment = Equipment {
             weapon: Some(item("sword", 1)),
             ..Default::default()
@@ -431,11 +443,13 @@ mod tests {
         let mut runes = RuneInventory(HashMap::from([("crit_shard".to_string(), 2)]));
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
+        let mut currency = Currency(10);
 
         assert!(socket_rune(
             &mut equipment,
             &mut runes,
             &library,
+            &mut currency,
             EquipSlot::Weapon,
             0,
             "crit_shard",
@@ -446,6 +460,33 @@ mod tests {
             equipment.weapon.unwrap().sockets[0],
             Some("crit_shard".to_string())
         );
+        assert_eq!(currency.0, 0);
+    }
+
+    #[test]
+    fn socket_rune_rejects_insufficient_currency_and_charges_nothing() {
+        let mut equipment = Equipment {
+            weapon: Some(item("sword", 1)),
+            ..Default::default()
+        };
+        let mut runes = RuneInventory(HashMap::from([("crit_shard".to_string(), 2)]));
+        let mut library = RuneLibrary::default();
+        library.0.insert("crit_shard".to_string(), crit_rune());
+        let mut currency = Currency(9);
+
+        assert!(!socket_rune(
+            &mut equipment,
+            &mut runes,
+            &library,
+            &mut currency,
+            EquipSlot::Weapon,
+            0,
+            "crit_shard",
+        ));
+
+        assert_eq!(currency.0, 9);
+        assert_eq!(runes.0["crit_shard"], 2);
+        assert!(equipment.weapon.unwrap().sockets[0].is_none());
     }
 
     #[test]
@@ -457,15 +498,18 @@ mod tests {
         let mut runes = RuneInventory::default();
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
+        let mut currency = Currency(10);
 
         assert!(!socket_rune(
             &mut equipment,
             &mut runes,
             &library,
+            &mut currency,
             EquipSlot::Weapon,
             0,
             "crit_shard",
         ));
+        assert_eq!(currency.0, 10);
     }
 
     #[test]
@@ -480,16 +524,19 @@ mod tests {
         let mut runes = RuneInventory(HashMap::from([("crit_shard".to_string(), 1)]));
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
+        let mut currency = Currency(10);
 
         assert!(!socket_rune(
             &mut equipment,
             &mut runes,
             &library,
+            &mut currency,
             EquipSlot::Weapon,
             0,
             "crit_shard",
         ));
         assert_eq!(runes.0["crit_shard"], 1);
+        assert_eq!(currency.0, 10);
     }
 
     #[test]
@@ -539,6 +586,7 @@ mod tests {
             RuneDefinition {
                 stat: Stat::MoveSpeed,
                 magnitude: 10.0,
+                socket_cost: 10,
             },
         );
         let equipment = Equipment {

@@ -251,9 +251,28 @@ Claude Code tasks as you start it, not all upfront.
     "Coins: N" line. Confirmed live: killing enemies with the new
     `Currency` loot entries (`converted_farmer`/`missionary`) and
     picking them up increases the HUD count.
-  - [ ] Vendor buy/sell UI, vendor content schema/prices, and the actual
-    forging-cost wiring on `socket_rune` are still not built — this pass
-    was the currency foundation only.
+  - [x] Socketing-cost wiring shipped: `RuneDefinition`/`content::RuneTemplate`
+    gain a required `socket_cost: u32` (no default — same "a content
+    author always makes a conscious choice" convention as
+    `EnemyTemplate::xp_reward`, so a new rune can't silently become free
+    to socket by omission). `socket_rune` now takes `&mut Currency`,
+    rejecting (no state change at all, including no currency deducted)
+    if the balance can't cover it — `unsocket_rune` is untouched, still
+    free/reversible. Client's forging panel shows a live "Coins: N" line
+    and each rune button as `"<rune_id> (xN) - <cost>g"`, disabled via
+    `egui::Button`/`add_enabled` when unaffordable — a new client-local
+    `RuneTemplates` resource (mirroring `EnemyTemplates`) exists purely
+    for this display/gating; the server independently enforces the real
+    charge regardless of what the client shows. `crit_shard`/
+    `swift_shard` priced at 20/15 — placeholder numbers, not tuned (see
+    `MECHANICS.md`'s open questions on currency amounts). `spawn_starter_loot`
+    gained a 50-currency drop alongside the existing weapon/runes so
+    socketing is testable without an enemy kill first. Confirmed live:
+    unaffordable rune buttons greyed out, a successful socket deducted
+    coins, unsocketing gave no refund.
+  - [ ] Vendor buy/sell UI and content schema (prices) are still not
+    built — this pass covered the currency foundation and forging cost,
+    not vendors.
 - [ ] Enemy visual-variant data shape (shared base template + swappable
   sprite field) — see `MECHANICS.md`. Deferred to the same part 2 pass;
   unrelated to forging, just filed under the same milestone.

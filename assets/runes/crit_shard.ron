@@ -1,4 +1,5 @@
 (
     stat: CritChance,
     magnitude: 0.05,
+    socket_cost: 20,
 )

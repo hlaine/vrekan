@@ -18,7 +18,8 @@ use bevy_replicon_renet::{
     RenetChannelsExt, RenetClient, RepliconRenetPlugins,
 };
 use content::{
-    load_all_enemy_templates, load_all_interactable_templates, EnemyTemplate, InteractableTemplate,
+    load_all_enemy_templates, load_all_interactable_templates, load_all_rune_templates,
+    EnemyTemplate, InteractableTemplate, RuneTemplate,
 };
 use game_core::movement::Position;
 use game_core::player::Player;
@@ -85,6 +86,11 @@ const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
 // renders" split as `ENEMY_TEMPLATES_DIR`. Read by
 // `interaction_trigger_system`.
 const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
+
+// Loaded locally purely for `socket_cost` display/gating in the forging
+// panel — same split as `ENEMY_TEMPLATES_DIR` above; the server is what
+// actually resolves/charges a socket action (`game_core::socket_rune`).
+const RUNE_TEMPLATES_DIR: &str = "assets/runes";
 
 // Relative to the assets root (loaded via AssetServer), not the filesystem
 // path used for ENEMY_TEMPLATES_DIR above. Must stay in sync with the
@@ -166,6 +172,11 @@ struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
 /// doc comment.
 #[derive(Resource)]
 struct InteractableTemplates(Vec<(String, InteractableTemplate)>);
+
+/// Rune templates loaded purely for `socket_cost` lookup by rune id in the
+/// forging panel — see `RUNE_TEMPLATES_DIR`'s doc comment.
+#[derive(Resource)]
+struct RuneTemplates(Vec<(String, RuneTemplate)>);
 
 /// Which panel `interaction_trigger_system` opened, if any: a runestone-style
 /// plain-text dialog, or the forging UI (gated to blacksmith-kind
@@ -273,6 +284,10 @@ fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
         load_all_interactable_templates(Path::new(INTERACTABLE_TEMPLATES_DIR))
             .unwrap_or_else(|error| panic!("failed to load interactable templates: {error}"));
     commands.insert_resource(InteractableTemplates(interactable_templates));
+
+    let rune_templates = load_all_rune_templates(Path::new(RUNE_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load rune templates: {error}"));
+    commands.insert_resource(RuneTemplates(rune_templates));
 }
 
 /// Loads this client's persistent character ID from the given path
@@ -1015,19 +1030,27 @@ fn dialog_panel_system(
     }
 }
 
-/// One row per socket: filled sockets get an "Unsocket" button; empty ones
-/// get one "Socket <rune_id> (xN)" button per rune the player actually has
-/// in stock (`RuneInventory`) — reads real rune ids straight off replicated
-/// data rather than a hardcoded list, so a new rune template needs no
-/// client change to become forgeable. Rune ids are sorted for a stable
-/// button order (`RuneInventory`'s `HashMap` iteration order isn't
-/// otherwise guaranteed frame-to-frame).
+/// One row per socket: filled sockets get an "Unsocket" button (still
+/// free — see `game_core::unsocket_rune`); empty ones get one "Socket
+/// <rune_id> (xN) - <cost>g" button per rune the player actually has in
+/// stock (`RuneInventory`), disabled if `currency` can't cover that
+/// rune's `socket_cost` (looked up from `RuneTemplates`, purely for
+/// display/gating — the server independently enforces the real charge in
+/// `game_core::socket_rune`, so this is a convenience, not the source of
+/// truth). Reads real rune ids straight off replicated data rather than a
+/// hardcoded list, so a new rune template needs no client change to
+/// become forgeable. Rune ids are sorted for a stable button order
+/// (`RuneInventory`'s `HashMap` iteration order isn't otherwise
+/// guaranteed frame-to-frame).
+#[allow(clippy::too_many_arguments)] // one input per rendered/interactive concern, inherent to this row's job
 fn socket_row(
     ui: &mut egui::Ui,
     slot: EquipSlot,
     socket_index: usize,
     socket: &Option<String>,
     runes: &RuneInventory,
+    rune_templates: &RuneTemplates,
+    currency: &Currency,
     socket_clicked: &mut Option<(EquipSlot, usize, String)>,
     unsocket_clicked: &mut Option<(EquipSlot, usize)>,
 ) {
@@ -1043,7 +1066,18 @@ fn socket_row(
             let mut rune_ids: Vec<_> = runes.0.iter().filter(|(_, count)| **count > 0).collect();
             rune_ids.sort_by_key(|(rune_id, _)| rune_id.as_str());
             for (rune_id, count) in rune_ids {
-                if ui.button(format!("{rune_id} (x{count})")).clicked() {
+                let cost = rune_templates
+                    .0
+                    .iter()
+                    .find(|(key, _)| key == rune_id)
+                    .map(|(_, template)| template.socket_cost)
+                    .unwrap_or(0);
+                let affordable = currency.0 >= cost;
+                let label = format!("{rune_id} (x{count}) - {cost}g");
+                if ui
+                    .add_enabled(affordable, egui::Button::new(label))
+                    .clicked()
+                {
                     *socket_clicked = Some((slot, socket_index, rune_id.clone()));
                 }
             }
@@ -1061,11 +1095,13 @@ fn socket_row(
 /// — this panel can be left open while walking away, at which point those
 /// requests just silently no-op, same "invalid action, no client-side
 /// feedback yet" treatment every other action system already has.
+#[allow(clippy::too_many_arguments)] // one query/resource per rendered/interactive concern, inherent to this panel's job
 fn forging_panel_system(
     mut contexts: EguiContexts,
     local_player: Res<LocalPlayer>,
     mut interaction_panel: ResMut<InteractionPanel>,
-    query: Query<(&Equipment, &RuneInventory)>,
+    query: Query<(&Equipment, &RuneInventory, &Currency)>,
+    rune_templates: Res<RuneTemplates>,
     mut socket_input: MessageWriter<SocketRuneInput>,
     mut unsocket_input: MessageWriter<UnsocketRuneInput>,
 ) {
@@ -1075,7 +1111,7 @@ fn forging_panel_system(
     let Some(entity) = local_player.0 else {
         return;
     };
-    let Ok((equipment, runes)) = query.get(entity) else {
+    let Ok((equipment, runes, currency)) = query.get(entity) else {
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -1089,6 +1125,8 @@ fn forging_panel_system(
     egui::Window::new("Forging")
         .open(&mut open)
         .show(ctx, |ui| {
+            ui.label(format!("Coins: {}", currency.0));
+            ui.separator();
             for (label, slot, item) in [
                 ("Weapon", EquipSlot::Weapon, &equipment.weapon),
                 ("Armor", EquipSlot::Armor, &equipment.armor),
@@ -1104,6 +1142,8 @@ fn forging_panel_system(
                                 socket_index,
                                 socket,
                                 runes,
+                                &rune_templates,
+                                currency,
                                 &mut socket_clicked,
                                 &mut unsocket_clicked,
                             );

@@ -27,10 +27,14 @@ impl ItemTemplate {
 
 /// Data-driven shape for a rune template — `Stat` is likewise reused
 /// directly from `game_core` for the same reason `EquipSlot` is above.
+/// `socket_cost` is required, not defaulted — same "a content author
+/// always makes a conscious choice" convention as `EnemyTemplate::xp_reward`,
+/// so a new rune can't silently become free to socket by omission.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct RuneTemplate {
     pub stat: Stat,
     pub magnitude: f32,
+    pub socket_cost: u32,
 }
 
 impl RuneTemplate {
@@ -38,6 +42,7 @@ impl RuneTemplate {
         RuneDefinition {
             stat: self.stat,
             magnitude: self.magnitude,
+            socket_cost: self.socket_cost,
         }
     }
 }
@@ -159,12 +164,14 @@ mod tests {
             r#"(
                 stat: CritChance,
                 magnitude: 0.05,
+                socket_cost: 15,
             )"#,
         )
         .unwrap();
 
         assert_eq!(template.stat, Stat::CritChance);
         assert_eq!(template.magnitude, 0.05);
+        assert_eq!(template.socket_cost, 15);
     }
 
     #[test]

@@ -702,20 +702,24 @@ fn spawn_enemies(mut commands: Commands) {
     }
 }
 
-/// Starter loot: a socketed weapon and one of each rune, spawned once per
-/// new game (not on every restart of an existing one — see below) so a
-/// fresh character has something to forge with straight away rather than
-/// grinding enemy kills first — confirmed as wanted, kept rather than
-/// stripped out as a one-off test aid (see `ROADMAP.md`'s M8 step 10
-/// entry). Placed at the midpoint between the runestone and blacksmith
-/// (x=100/x=540), safely outside either's 60-unit interact range so `E`
-/// there always picks up rather than interacting.
+/// Starter loot: a socketed weapon, one of each rune, and enough currency
+/// to actually socket one, spawned once per new game (not on every
+/// restart of an existing one — see below) so a fresh character has
+/// something to forge with straight away rather than grinding enemy kills
+/// first — confirmed as wanted, kept rather than stripped out as a
+/// one-off test aid (see `ROADMAP.md`'s M8 step 10 entry). The currency
+/// amount (50) covers either rune's `socket_cost` (20/15 as of M7 part
+/// 2's socketing-cost pass) with some left over, so socketing is testable
+/// without needing an enemy kill first either. Placed at the midpoint
+/// between the runestone and blacksmith (x=100/x=540), safely outside
+/// either's 60-unit interact range so `E` there always picks up rather
+/// than interacting.
 ///
 /// Gated on the same new-vs-existing-game check `load_game_password` makes
 /// (a fresh disk read, not a shared resource, to avoid a Startup-ordering
 /// dependency between the two): without it, every server restart of an
-/// already-running game would spawn three more drops on top of whatever's
-/// still there, an unbounded pile-up rather than a one-time bootstrap.
+/// already-running game would spawn more drops on top of whatever's still
+/// there, an unbounded pile-up rather than a one-time bootstrap.
 fn spawn_starter_loot(mut commands: Commands, game_id: Res<GameId>) {
     let existing_save = persistence::load_game_save(Path::new(SAVES_DIR), &game_id.0)
         .unwrap_or_else(|error| panic!("failed to load game save: {error}"));
@@ -737,6 +741,10 @@ fn spawn_starter_loot(mut commands: Commands, game_id: Res<GameId>) {
     commands.spawn((
         Position { x: 340.0, y: 30.0 },
         ItemDrop(DroppedLoot::Rune("swift_shard".to_string())),
+    ));
+    commands.spawn((
+        Position { x: 360.0, y: 30.0 },
+        ItemDrop(DroppedLoot::Currency(50)),
     ));
 }
 
@@ -1005,15 +1013,16 @@ fn apply_unequip_input(
 
 /// Turns a client's `SocketRuneInput` into `game_core::socket_rune`'s
 /// resolution — a no-op (see that function's doc comment) for any
-/// untrusted-input case: unknown rune, empty stack, missing item, bad
-/// socket index, or an already-occupied socket. Also a no-op if the actor
-/// isn't in range of a blacksmith-kind `Interactable` (`FORGING_PANEL_ID`)
-/// — a real behavior change from M7's free-anywhere hotkey stand-in (see
-/// `DECISIONS.md`'s M8 planning entry), enforced here rather than trusting
-/// the client to only send this while its forging panel is open.
+/// untrusted-input case: unknown rune, insufficient currency, empty
+/// stack, missing item, bad socket index, or an already-occupied socket.
+/// Also a no-op if the actor isn't in range of a blacksmith-kind
+/// `Interactable` (`FORGING_PANEL_ID`) — a real behavior change from M7's
+/// free-anywhere hotkey stand-in (see `DECISIONS.md`'s M8 planning
+/// entry), enforced here rather than trusting the client to only send
+/// this while its forging panel is open.
 fn apply_socket_rune_input(
     mut inputs: MessageReader<FromClient<SocketRuneInput>>,
-    mut players: Query<(&Position, &mut Equipment, &mut RuneInventory)>,
+    mut players: Query<(&Position, &mut Equipment, &mut RuneInventory, &mut Currency)>,
     interactables: Query<(&Position, &Interactable)>,
     interactable_library: Res<InteractableLibrary>,
     runes: Res<RuneLibrary>,
@@ -1022,7 +1031,9 @@ fn apply_socket_rune_input(
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((actor_pos, mut equipment, mut rune_inventory)) = players.get_mut(entity) else {
+        let Ok((actor_pos, mut equipment, mut rune_inventory, mut currency)) =
+            players.get_mut(entity)
+        else {
             continue;
         };
         if !is_near_interactable_with_panel(
@@ -1037,6 +1048,7 @@ fn apply_socket_rune_input(
             &mut equipment,
             &mut rune_inventory,
             &runes,
+            &mut currency,
             input.slot,
             input.socket_index,
             &input.rune_id,
