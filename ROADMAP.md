@@ -637,6 +637,31 @@ particles have no gameplay effect to authorize or keep in sync).
 - [ ] `bevy_hanabi` added (client-only) for GPU particle effects: sparks/
   glow at torches, placed via a new Tiled object layer, read purely
   client-side (no server involvement — cosmetic only).
+  - [x] Torch placement + lighting shipped: new `"ambience"` Tiled object
+    layer in `assets/maps/valley.tmx` with two named `"torch"` point
+    objects near the runestone/blacksmith — same hand-edit-the-TMX
+    approach M8 step 8 used. New `spawn_torch_lights`, a client-only
+    system reading `bevy_ecs_tiled`'s `TiledEvent<ObjectCreated>` and
+    inserting a warm `PointLight2d` directly onto the Tiled-spawned
+    object entity — no separate entity spawn, no server/protocol/
+    `Replicated` involvement at all (purely cosmetic, same category as
+    the map's client-only visual tile layers). **Two real findings from
+    live debugging, not assumed:**
+    - The anticipated risk — that `bevy_ecs_tiled`'s own per-object
+      `Transform` might use a different coordinate convention than the
+      project's `world_y = -tiled_y` rule — did **not** materialize.
+      Empirically confirmed via a temporary debug print that it lands at
+      exactly `(tiled_x, -tiled_y)` under `TilemapAnchor::TopLeft`,
+      matching the server's manual convention precisely. No fallback to
+      a second `tiled::Loader` pass was needed.
+    - The actual bug: `bevy_ecs_tiled` sets the object's `Name` component
+      to a wrapped `"Point(torch)"`-style string (shape kind included),
+      not the raw Tiled name — an exact-match against `Name` silently
+      matched nothing. Fixed by matching against the separate `TiledName`
+      component instead, which holds the plain `"torch"` string. Found
+      via a live debug print after the first attempt rendered nothing,
+      not guessed at.
+    Particle effects (sparks/glow) still to come.
 - [ ] A lighting/ambience debug panel: sliders for ambient and point-light
   color/intensity/radius — the actual sandbox for picking sprite/tile
   colors against real lighting before any art exists.

@@ -7,7 +7,9 @@ use std::time::SystemTime;
 use bevy::camera::Projection;
 use bevy::gizmos::prelude::*;
 use bevy::prelude::*;
-use bevy_ecs_tiled::prelude::{TiledMap, TiledPlugin, TilemapAnchor};
+use bevy_ecs_tiled::prelude::{
+    ObjectCreated, TiledEvent, TiledMap, TiledName, TiledObject, TiledPlugin, TilemapAnchor,
+};
 use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_lit::prelude::*;
@@ -158,6 +160,13 @@ const FACING_ARROW_COLOR: Color = Color::WHITE;
 // the status ring `status_indicator_system` draws reads as surrounding the
 // sprite, not overlapping it.
 const STATUS_RING_RADIUS: f32 = 20.0;
+
+// The Tiled object name `spawn_torch_lights` matches against, in the
+// map's "ambience" object layer (assets/maps/valley.tmx) — a purely
+// client-side, cosmetic placement, no server/protocol involvement (see
+// DECISIONS.md's M8.5 entry).
+const TORCH_OBJECT_NAME: &str = "torch";
+const TORCH_LIGHT_COLOR: Color = Color::srgb(1.0, 0.6, 0.2);
 
 // This client's persistent character identity, generated once and reused
 // across runs — not tied to any account system (see DECISIONS.md's
@@ -310,6 +319,7 @@ fn main() {
                 init_replicated_enemies,
                 init_replicated_item_drops,
                 init_replicated_interactables,
+                spawn_torch_lights,
                 player_input_system,
                 interaction_trigger_system,
                 sync_transform_system,
@@ -589,6 +599,47 @@ fn init_replicated_interactables(
             Sprite::from_color(INTERACTABLE_COLOR, Vec2::splat(INTERACTABLE_SPRITE_SIZE)),
             Transform::default(),
         ));
+    }
+}
+
+/// Reads `bevy_ecs_tiled`'s `ObjectCreated` events for the map's
+/// "ambience" object layer and turns each named `TORCH_OBJECT_NAME`
+/// object into a `PointLight2d` — purely cosmetic, so this reads the
+/// client's own already-loaded copy of the Tiled map data directly rather
+/// than needing any server involvement or replication (same "visual
+/// layers are client-only, unlike the server-authoritative collision
+/// layer" split `DECISIONS.md`'s M8.5 entry documents). `bevy_ecs_tiled`
+/// already spawns a correctly-positioned entity (with `Transform`, world
+/// coordinates already resolved — empirically confirmed to land at
+/// exactly `(tiled_x, -tiled_y)`, the same convention `server`'s manual
+/// object parsing uses) per Tiled object, so this just inserts a light
+/// onto that same entity instead of spawning a separate one or
+/// re-deriving world coordinates by hand. Matches on the object's
+/// `TiledName` component, **not** its `Name` — `bevy_ecs_tiled` sets
+/// `Name` to a wrapped `"Point(torch)"`-style string (shape kind included)
+/// for debugging purposes, and `TiledName` is the one holding the raw
+/// Tiled object name (`"torch"`) — found via a live debug print after an
+/// exact-match on `Name` silently matched nothing, not assumed.
+fn spawn_torch_lights(
+    mut commands: Commands,
+    mut object_events: MessageReader<TiledEvent<ObjectCreated>>,
+    names: Query<&TiledName, With<TiledObject>>,
+) {
+    for event in object_events.read() {
+        let Ok(name) = names.get(event.origin) else {
+            continue;
+        };
+        if name.0 != TORCH_OBJECT_NAME {
+            continue;
+        }
+        commands.entity(event.origin).insert(PointLight2d {
+            color: TORCH_LIGHT_COLOR,
+            intensity: 1.5,
+            inner_radius: 15.0,
+            outer_radius: 150.0,
+            falloff: 4.0,
+            cast_shadows: false,
+        });
     }
 }
 
