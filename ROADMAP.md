@@ -698,6 +698,17 @@ particles have no gameplay effect to authorize or keep in sync).
   distinct ids. **Confirmed live**: ambient and point-light sliders all
   work, both torch sections expand independently with no id-clash warning.
 
+**Definition of done, confirmed live:** placeholder sprites + the real
+Tiled tilemap render correctly with `Lighting2dPlugin` active; the pillar
+occluder casts a correct shadow; `AmbientLight2d` is live-adjustable via
+the debug panel; both torch particle effects render alongside everything
+else; every egui panel (HUD, inventory, character, dialog, forging,
+vendor, party status, minimap, lighting debug) is fully click-interactive;
+a temporary `FrameTimeDiagnosticsPlugin` recorded a stable ~60 FPS with
+lighting + the occluder + both torch lights + particles + the debug panel
+all active together, matching the earlier occluder-only measurement — see
+`DECISIONS.md`'s M8.5 entry for the full writeup.
+
 ## M9 — Objectives & first dungeon content
 - [ ] Hand-authored dungeon instance, entered explicitly from the overworld
 - [ ] One full objective sequence, tier-1 enemies only

@@ -1196,3 +1196,124 @@ powerful ones across several levels, performed at blacksmiths and a new
 current `RuneLibrary`/`RuneInventory` model — both are already
 open/data-keyed — so nothing here needs to change to keep this option
 open; recorded purely so it isn't lost before its own design pass.
+
+## M8.5: lighting/ambience foundation — `bevy_lit`/`bevy_hanabi` added, gizmo
+## status-indicator redesign, two findings from live debugging
+
+**Context:** Before starting real art (maps, tiles, character sprites), the
+user wanted lighting/ambience effects (glow, torches, shadows, sparks)
+available and tunable first, so sprite/tile colors get chosen against real
+lighting rather than guessed blind — plus the one remaining real M8 UI gap
+(minimap, party status). Research during planning ruled out `bevy_tiles`
+(an abandoned, unrelated low-level grid-indexing crate, last released 2024
+on Bevy 0.13 — a naming mistake, not adopted) and confirmed `bevy_lit`
+0.11.0 and `bevy_hanabi` 0.19.0 both explicitly support Bevy 0.19 (this
+project's exact pin). Everything in this milestone is client-only
+rendering/presentation — no `game_core`/`server`/`protocol` changes — since
+lights and particles have no gameplay effect to authorize or keep in sync,
+the same category as the map's existing client-only visual tile layers.
+
+**Decision — both new crates added client-only, verified rather than
+trusted.** `bevy_lit = "=0.11.0"` and `bevy_hanabi = { version = "=0.19.0",
+default-features = false, features = ["2d"] }` (this project has no 3D
+rendering; `bevy_hanabi`'s default features are 3D-oriented) went into
+`client/Cargo.toml` and `[workspace.dependencies]` only. Both pins were
+confirmed via `cargo add --dry-run` against the resolvable version before
+writing them down, not trusted from research alone, and `cargo tree -p
+server` was re-run after each addition to confirm no leak — matching this
+project's `bevy_ecs_tiled`/`avian2d` precedent for keeping the headless
+server's dependency footprint minimal.
+
+**Decision — status indicators (downed/stunned/leash-warning) moved off
+`Sprite.color` onto a gizmo overlay.** The old `player_appearance_system`
+signaled status by overwriting each entity's base sprite color every frame
+— a real conflict with `bevy_lit`, which wants to own the sprite's "true"
+color to shade it, and would have blanked out real texture detail once art
+lands. Replaced with `status_indicator_system`, drawing a colored ring via
+`gizmos.circle_2d` with the same `Downed` > `Stunned` > leash-warning
+priority the old code used — immediate-mode, no spawned entity, no
+lifecycle/stale-state risk, following the exact precedent
+`facing_indicator_system` already established. Trade-off: less icon-like
+than a spawned overlay sprite, but the right call for a placeholder-art-era
+milestone. `player_appearance_system`/`PartySprites` removed entirely; base
+sprite color is still set once at spawn (`init_replicated_players`/
+`init_replicated_enemies`), untouched by this change.
+
+**Decision — occluder count deliberately capped, backed by a measured
+number, not assumed.** `bevy_lit` has an open upstream issue reporting
+heavy performance cost from `LightOccluder2d` even without shadows
+enabled. Capped at one placeholder occluder this pass. A temporary
+`FrameTimeDiagnosticsPlugin`/`LogDiagnosticsPlugin` (added, measured, then
+fully removed — never left in the codebase) recorded a stable ~60 FPS /
+~16.7ms both right after the occluder was added and again at the very end
+of the milestone with lighting + the occluder + two torch lights + torch
+particle effects + the new debug panel all active together — no
+regression from stacking the rest of the milestone on top. Zoom-extreme
+(`MIN_ZOOM`/`MAX_ZOOM`) frame time wasn't separately isolated: camera zoom
+only changes the orthographic projection scale, not scene complexity (light/
+occluder/particle-emitter count is fixed regardless of zoom at this map's
+scale), so a single steady-state reading was judged to generalize rather
+than standing up a second client purely to force party spread.
+
+**Decision — torches are placed via a Tiled object layer and read
+client-side only, no server involvement.** A new `"ambience"` object layer
+in `assets/maps/valley.tmx` holds named `"torch"` point objects (same
+hand-edit-the-TMX approach the M8 interactables layer used). A new
+client-only `spawn_torch_lights` system reads `bevy_ecs_tiled`'s
+`TiledEvent<ObjectCreated>` and inserts a `PointLight2d` plus a
+`ParticleEffect` directly onto the Tiled-spawned object entity — no
+separate entity spawn, no `Replicated` marker, no protocol/server
+involvement at all, matching the map's other purely-visual client-only
+layers.
+
+**Found via live debugging, not assumed — two real findings from the torch
+work:**
+- The anticipated risk (that `bevy_ecs_tiled`'s own per-object `Transform`
+  computation might use a different coordinate convention than this
+  project's hand-rolled `world_y = -tiled_y` rule) did **not** materialize.
+  A temporary debug print confirmed the object `Transform` lands at exactly
+  `(tiled_x, -tiled_y)` under `TilemapAnchor::TopLeft`, matching the
+  server's manual convention precisely — no fallback to a second
+  `tiled::Loader` pass was needed.
+- The actual bug was unrelated: `bevy_ecs_tiled` sets the spawned object's
+  Bevy `Name` component to a wrapped `"Point(torch)"`-style string (shape
+  kind included, for its own debugging), not the raw Tiled object name —
+  an exact-match filter against `Name` silently matched nothing. Fixed by
+  matching against the separate `TiledName` component instead, which holds
+  the plain `"torch"` string. Found only after the first attempt rendered
+  no torches at all and a live debug print traced why, not guessed at up
+  front.
+
+**Decision — the lighting/ambience debug panel is a dev-only sandbox, not
+persisted or replicated.** `lighting_debug_panel_system` (registered in
+`EguiPrimaryContextPass`, per the M8-part-1 finding above it) exposes
+sliders for the single `AmbientLight2d` plus one collapsible section per
+`PointLight2d` entity, labeled by `TiledName` where available (the
+torches) and by entity id otherwise (the smoke-test light). This is the
+actual tool the user will use to pick sprite/tile colors against real
+lighting before any art exists — values reset to their `setup_scene`/
+`spawn_torch_lights` defaults on restart, deliberately, since nothing here
+needs to survive a session.
+
+**Found via live testing: an egui widget-id clash from two lights sharing
+one label.** Both torches share the same `TiledName` (`"torch"`); using
+that label directly as a `ui.collapsing(...)` section's id caused egui's
+own "first/second use of widget ID" warning box to render on top of the
+second torch's sliders, visually blocking them (not a crash, not a build/
+clippy/test failure — only visible by actually opening the panel and
+expanding both sections). Fixed by wrapping each light's whole widget
+block in `ui.push_id(entity, ...)`, salting every child widget's id with
+the owning entity so same-labeled lights no longer collide. Same general
+lesson as the M8-part-1 `EguiPrimaryContextPass` finding: interactive-UI
+bugs in this stack tend to be invisible to static checks and only surface
+by actually operating the widget.
+
+**Consequences:** Any future spawned light (new torch types, a spell VFX,
+etc.) that reuses a shared/generic name in its `TiledName` or label must
+either salt its debug-panel id with the entity (`ui.push_id`) or otherwise
+avoid label-only egui ids, per the finding above. Any future status-effect
+visual should default to a gizmo overlay rather than sprite-color
+overwriting, per the `bevy_lit` conflict this milestone resolved. Real art
+(sprites/tiles) can now be color-chosen against actual ambient + point
+lighting via the debug panel, unblocking the graphics-design work this
+whole milestone existed to prepare for.
