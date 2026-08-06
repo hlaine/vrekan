@@ -364,6 +364,7 @@ fn main() {
                 hud_system,
                 party_status_system,
                 minimap_system,
+                lighting_debug_panel_system,
                 inventory_panel_system,
                 character_panel_system,
                 dialog_panel_system,
@@ -1100,6 +1101,68 @@ fn minimap_system(mut contexts: EguiContexts, local_player: Res<LocalPlayer>, pa
                 painter.circle_filled(point, 3.0, color);
             }
         });
+}
+
+/// Sandbox tool for picking sprite/tile colors against real lighting before
+/// any real art exists (M8.5 step 13) — sliders for the single `AmbientLight2d`
+/// plus every placed `PointLight2d`, labeled by `TiledName` where the light
+/// came from a Tiled object (torches) and by entity id otherwise (the
+/// smoke-test light). Purely a dev tool: nothing here is persisted or
+/// replicated, values reset to their `setup_scene`/`spawn_torch_lights`
+/// defaults on restart.
+fn lighting_debug_panel_system(
+    mut contexts: EguiContexts,
+    mut ambient: Single<&mut AmbientLight2d>,
+    mut point_lights: Query<(Entity, &mut PointLight2d, Option<&TiledName>)>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    egui::Window::new("Lighting debug")
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-10.0, -10.0))
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.heading("Ambient light");
+            edit_light_color(ui, &mut ambient.color);
+            ui.add(egui::Slider::new(&mut ambient.intensity, 0.0..=5.0).text("intensity"));
+
+            ui.separator();
+            ui.heading("Point lights");
+            for (entity, mut light, name) in &mut point_lights {
+                // Multiple torches share the same `TiledName` ("torch"), so the
+                // label alone isn't a unique egui id — salt every widget in this
+                // block with the entity so same-named lights don't clash.
+                ui.push_id(entity, |ui| {
+                    let label = name.map_or_else(|| format!("light {entity}"), |n| n.0.clone());
+                    ui.collapsing(label, |ui| {
+                        edit_light_color(ui, &mut light.color);
+                        ui.add(
+                            egui::Slider::new(&mut light.intensity, 0.0..=5.0).text("intensity"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut light.inner_radius, 0.0..=300.0)
+                                .text("inner radius"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut light.outer_radius, 0.0..=500.0)
+                                .text("outer radius"),
+                        );
+                        ui.add(egui::Slider::new(&mut light.falloff, 0.1..=10.0).text("falloff"));
+                    });
+                });
+            }
+        });
+}
+
+fn edit_light_color(ui: &mut egui::Ui, color: &mut Color) {
+    let srgba = color.to_srgba();
+    let mut rgb = [srgba.red, srgba.green, srgba.blue];
+    ui.horizontal(|ui| {
+        ui.color_edit_button_rgb(&mut rgb);
+        ui.label("color");
+    });
+    *color = Color::srgb(rgb[0], rgb[1], rgb[2]);
 }
 
 /// One row per socket: "filled" (by rune id) or "empty" — sockets aren't

@@ -679,9 +679,24 @@ particles have no gameplay effect to authorize or keep in sync).
     outward from both torches alongside the existing glow; all egui panels
     remained fully clickable with both `bevy_lit` and `bevy_hanabi` active
     together.
-- [ ] A lighting/ambience debug panel: sliders for ambient and point-light
+- [x] A lighting/ambience debug panel: sliders for ambient and point-light
   color/intensity/radius — the actual sandbox for picking sprite/tile
-  colors against real lighting before any art exists.
+  colors against real lighting before any art exists. New
+  `lighting_debug_panel_system` (`EguiPrimaryContextPass`, anchored
+  bottom-right): one section for the single `AmbientLight2d` (queried via
+  `Single`), plus one collapsible section per `PointLight2d` entity,
+  labeled by `TiledName` where the light came from a Tiled object (the
+  torches) and by entity id otherwise (the smoke-test light). Color edited
+  via `egui::color_edit_button_rgb`, round-tripped through
+  `Color::to_srgba`/`Color::srgb`. Dev-only tool: nothing persisted or
+  replicated, values reset on restart. One real bug found live: both
+  torches share the `TiledName` `"torch"`, so using that label directly as
+  the collapsing section's egui id caused a widget-id clash (egui's own
+  "first/second use of widget ID" warning overlay, which visually blocked
+  the second torch's sliders) — fixed by wrapping each light's whole
+  widget block in `ui.push_id(entity, ...)` so same-named lights get
+  distinct ids. **Confirmed live**: ambient and point-light sliders all
+  work, both torch sections expand independently with no id-clash warning.
 
 ## M9 — Objectives & first dungeon content
 - [ ] Hand-authored dungeon instance, entered explicitly from the overworld
