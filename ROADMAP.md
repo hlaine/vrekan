@@ -709,6 +709,277 @@ lighting + the occluder + both torch lights + particles + the debug panel
 all active together, matching the earlier occluder-only measurement — see
 `DECISIONS.md`'s M8.5 entry for the full writeup.
 
+## M8.6 — Weapon-driven combat
+
+Client/server split as usual — weapon stats and timing are simulation state
+(server-authoritative, `game_core`), presentation (HUD countdown) is
+`client`. See `MECHANICS.md`'s Weapons & attack timing section for the full
+mechanic shape this builds; the below is the build breakdown.
+
+- [ ] Weapon content schema: `ItemDefinition` (weapon-slot items) gains
+  `damage`, `damage_type`, `range`, `attack_duration`, `recovery` —
+  resolves `MECHANICS.md`'s long-standing "ranges are content data,
+  eventually" note for real.
+- [ ] Phased attack timing, replacing `MeleeAttack::cooldown`'s single flat
+  number: windup → damage resolves → recovery lockout. New phase
+  representation on/alongside `AttackTimer` (decide enum-state vs. two
+  timer fields when implementing). A windup in progress is cancelled
+  outright if the attacker becomes `Stunned`/`Downed`/dies before it
+  resolves.
+- [ ] Rooted during windup, free to move during recovery — see
+  `MECHANICS.md`; flag as a starting assumption in code comments, not a
+  silent behavior choice.
+- [ ] Derive the player's effective attack from their equipped weapon in
+  `attack_system`, computed fresh from `Equipment` + `ItemLibrary` each
+  time (same pattern as today's effective crit stats — never cached),
+  replacing the hardcoded `MeleeAttack` spawned in `server/src/main.rs`.
+  **Build the resistance and damage sums as open-ended from the start**
+  (a running total, not a fixed two-term formula) — M8.7 and M8.12 both
+  add further terms to these same sums later; see `MECHANICS.md`'s
+  "Effective combat values are always computed fresh" section.
+- [ ] **Also read socketed runes on the equipped weapon/armor into this
+  same effective-attack computation**, not just the base item template —
+  a dependency M8.12's rune-power runes (bonus damage, on-hit effects)
+  need satisfied here, even though no rune grants either yet at this
+  point in the sequence.
+- [ ] Unarmed fallback attack profile for an empty `Weapon` slot.
+- [ ] Armor/Helmet gain a real mechanical effect: flat resistance % per
+  `DamageType`, same `DamageType`-keyed shape `Resistances` already uses
+  (not the fixed `Stat` enum). Players gain a base (empty-by-default)
+  `Resistances` component, matching enemies; target-side resistance
+  lookup in `attack_system` becomes an effective (summed) value,
+  symmetric to the attacker-side effective `CombatStats` that already
+  exists.
+- [ ] A handful of real weapon `.ron` files with distinct archetypes (e.g.
+  fast/short/low-damage vs. slow/long/high-damage), plus at least one
+  armor and one helmet item with a real resistance bonus — proves the
+  schema via content, no engine changes, same test M2 used for enemies.
+- [ ] Directional (facing-cone) melee arcs, resolving `MECHANICS.md`'s
+  previously-open question, now that weapon `range` is real content data.
+  Split into its own follow-on if it threatens to bloat this milestone
+  once the above is actually built.
+- [ ] Tests: weapon-stat resolution, unarmed fallback, effective-resistance
+  math, windup/recovery phase transitions and interruption.
+- [ ] HUD: extend the existing attack-cooldown display to show windup vs.
+  recovery distinctly rather than one flat countdown.
+
+Deliberately deferred, unblocked but not built here: weapon *switching*
+(primary/secondary slots, the M8 TAB-selector deferral) — single-weapon
+combat should be solid first.
+
+## M8.7 — Primary attributes & attack speed (revises M5)
+
+- [ ] `game_core::progression`: introduce an `Attribute` enum (Might,
+  Dexterity, Vitality, Intelligence) as the new target for
+  `allocate_stat_point`'s spend, replacing direct-to-secondary-stat
+  spending. Existing `Stat` enum stays as the target for rune/effect
+  bonuses — attributes derive `Stats`' bonus_* fields via a new pure
+  `derive_stats(&Attributes) -> Stats` function, layered onto that
+  existing plumbing rather than replacing it.
+- [ ] `Stat` gains an `AttackSpeed` variant (needed so runes can grant
+  attack speed directly, alongside Dexterity's own contribution) — summed
+  into effective attack speed the same 4-way way crit chance already is:
+  base (Dexterity-derived) + active effects + equipment/runes + level-up
+  points.
+- [ ] Derived formulas (tuning data, exact curves not final — see
+  `MECHANICS.md`'s Open questions):
+  - Might → % bonus weapon damage
+  - Dexterity → % attack-speed bonus (feeds M8.6's
+    `effective_recovery = base_recovery / (1 + bonus)`, recovery only,
+    never windup) + bonus crit chance
+  - Vitality → bonus max health + a small flat resistance bonus (stacks
+    additively with M8.6's armor resistance and, later, M8.12's Algiz rune)
+  - Intelligence → stored, spendable, **no wired effect until M8.10-12**
+- [ ] Migrate `allocate_stat_point` tests and the M8 character panel UI
+  (labels, spend targets) from direct secondary stats to attributes.
+- [ ] Tests: derived-stat formulas; attack-speed-to-recovery-time
+  conversion at zero Dexterity and at an extreme high value (confirm the
+  divisor never reaches zero).
+
+## M8.8 — Combat feedback: crit flash & critical-health bleeding
+
+Client-only presentation except one small replicated marker for crits — no
+`game_core` combat-*resolution* changes beyond exposing crit info and
+emitting that marker.
+
+- [ ] `resolve_damage` (M4, already shipped and tested) changes its return
+  shape to also report whether the hit crit, not just the damage amount —
+  a real change to already-tested code; update its existing unit tests
+  alongside the new ones.
+- [ ] `RecentCrit` marker component (short-lived, ~0.3-0.5s), inserted on
+  the target in `attack_system` when a hit crits, replicated like
+  `Downed`/`Stunned` — new `protocol` surface, flagged per `CLAUDE.md`.
+- [ ] Crit visual: `bevy_lit` intensity-spike-then-decay `PointLight2d`
+  burst + a one-shot `bevy_hanabi` rune-glyph particle flare at the
+  target, triggered off `RecentCrit`'s presence — reuses M8.5's torch
+  light/particle pattern, no new systems architecture.
+- [ ] Critically-low-health bleeding: purely client-side threshold check
+  on replicated `Health` (current/max), no new replication needed. Below
+  a tuning-data threshold, a continuous `bevy_hanabi` blood-mist trickle
+  plus a faint pulsing dark-red gizmo ring (reusing
+  `status_indicator_system`'s existing pattern) persists until death. No
+  indicator above threshold.
+- [ ] **Both of the above are explicitly gated to `Player`-or-enemy-marked
+  entities, excluding destructibles** (M8.9) — a crate breaking shouldn't
+  visually bleed or crit-flash.
+- [ ] Player-taken-damage flash/vignette on the local player's own hit —
+  cheap, high feedback value, entirely client-side off the player's own
+  replicated `Health` decreasing.
+- [ ] Boss health bar: explicitly **out of scope here**, deferred to M9
+  alongside the first real boss — nothing to build it against yet. Keep
+  the crit/bleeding systems entity-agnostic (not hardcoded to "regular
+  enemy") so a boss gets both for free once M9 lands, even before its
+  dedicated top-of-screen bar exists.
+- [ ] Tests: threshold-crossing logic (bleeding starts/stops at the right
+  percentage, handles death cleanly), `RecentCrit` insert/expiry timing.
+
+## M8.9 — Dynamic objects: destructibles & movable puzzle objects
+
+### Destructibles
+- [ ] `content::DestructibleTemplate` (health, loot table, optional
+  resistances) — same shape as `EnemyTemplate` minus AI/`XpReward`/attack
+  fields, reusing the established "new content type, spawned from a Tiled
+  object layer" pattern (interactables, torches).
+- [ ] `spawn_destructibles`, reading a new `"destructibles"` Tiled object
+  layer, mirroring `spawn_interactables`/`spawn_torch_lights`.
+- [ ] No changes to `attack_system`'s nearest-target search — destructibles
+  participate in the exact same `With<Health>` targeting as enemies, same
+  priority, by design (see `MECHANICS.md`). `death_system` already
+  handles the drop/despawn path unmodified.
+- [ ] A couple of real `.ron` destructible templates (e.g. a crate with a
+  common-loot table, a barrel with a currency-only table) to prove the
+  schema.
+
+### Movable puzzle objects & gates
+- [ ] Pushable object: a `RigidBody::Dynamic` entity with mass, no
+  `Health`/AI — reuses the existing enemy-push physics wholesale, no new
+  physics work.
+- [ ] Generic `Unlockable` gate primitive: an entity whose collider toggles
+  between blocking and passable, driven by `Vec<UnlockCondition>` where
+  **all conditions must hold simultaneously (AND, not OR)** — state this
+  explicitly in the type's doc comment, since M8.13 builds against it and
+  the semantics matter for that milestone's multi-key gate idea. Starts
+  with one variant, `ObjectInZone { object, zone }`, shaped so a
+  `HasKeyItem` variant (M8.13) can be added later without restructuring.
+- [ ] Trigger-zone check: a system comparing a pushable object's `Position`
+  against a defined target area (Tiled point or rectangle object),
+  flipping the matching `Unlockable`'s state when satisfied.
+- [ ] Puzzle placement/layout is per-dungeon content (M9's job) — this
+  milestone builds the mechanical primitives only, no actual puzzle
+  authored yet.
+- [ ] Tests: zone-overlap detection, gate state toggling (including a
+  multi-condition gate correctly staying closed until *all* conditions
+  are met), gate staying closed when no condition is met.
+
+## M8.10 — Rune discovery & learning
+
+- [ ] `DiscoveredRunes` (set, grows on first pickup of a rune type — new
+  in `merge_loot` alongside the existing `RuneInventory` stack increment)
+  and `KnownRunes` (set, mirrors `KnownSkills`) components, both replicated
+  and persisted like the rest of progression state.
+- [ ] `UnspentRuneCasts`, granted via `grant_xp` on level-up alongside the
+  existing stat/skill points — count gated by Intelligence per M8.7 (exact
+  curve is tuning data, see `MECHANICS.md`'s Open questions).
+- [ ] `socket_rune`/the M8.11/M8.12 combine functions gain a `KnownRunes`
+  membership check — the one new gate on otherwise-unchanged,
+  already-tested socket/unsocket code.
+- [ ] "Rune casting" panel at blacksmith/sejdr (reuses the existing
+  `is_near_interactable_with_panel` pattern): spend one
+  `UnspentRuneCasts`, server samples 3 from `DiscoveredRunes − KnownRunes`,
+  player picks one, added to `KnownRunes`. Fewer than 3 available → offer
+  whatever exists.
+- [ ] New `Interactable` payload: `grants_rune: Option<String>`, for
+  direct narrative grants (sejdr encounters, objectives) that bypass
+  casting — claimable once per player, same shape as other one-shot
+  interact effects.
+- [ ] `effective_magnitude = base_magnitude * (1 + intelligence_bonus)`
+  wired in at the same point `Equipment::stat_bonus` sums rune
+  contributions — the primary Intelligence hook, see `MECHANICS.md`.
+- [ ] Tests: cast sampling excludes already-known runes, gate rejects
+  socketing/combining an unknown rune even with stock on hand, direct
+  grant claims exactly once per player, magnitude scaling at zero and
+  high Intelligence.
+
+## M8.11 — Repeated-rune combining
+
+- [ ] `RuneTemplate` gains `tier: u32` and `upgrades_into: Option<String>`
+  (explicit, content-authored — not formula-derived).
+- [ ] Combine action: consume `combine_count` copies (2-9, capped by a
+  pure `max_combine_count(intelligence)` function) of the *same* known
+  rune from `RuneInventory` → produce 1 copy of its `upgrades_into`
+  target, quadratic currency cost per tier (existing `MECHANICS.md` stub).
+  Result always shown plainly before confirming — fully deterministic.
+- [ ] A first real tiered chain (e.g. `sowilo_t1` → `sowilo_t2`) to prove
+  the schema.
+- [ ] Tests: combine rejects an unknown rune, rejects insufficient stack
+  size, `max_combine_count` curve at representative Intelligence values.
+
+## M8.12 — Bind runes & rune powers
+
+- [ ] New `BindRecipe { inputs: Vec<String>, output: String }` content
+  list (order-independent multiset match) — curated, hand-authored
+  combinations, not exhaustive coverage of every possible input set.
+- [ ] Combine action, bind branch: consume the matching known runes from
+  `RuneInventory`, produce the output. **First successful attempt at a
+  given recipe reveals it server-wide** (shared discovery, not
+  per-character — matches the precedent that rune/item *definitions* are
+  universal content); revealed recipes show their result plainly on
+  future attempts, same as repeated combining. Unrecognized combinations
+  fail with no reveal.
+- [ ] `RuneDefinition` extended to optionally carry a flat bonus-damage-of-
+  a-`DamageType` and/or a chance-per-hit `EffectDefinition`, alongside the
+  existing `Stat` bonus — both fold into the effective-attack computation
+  M8.6 already built to read socketed runes. This alone covers Kenaz
+  (bonus flame damage) and Isaz (on-hit chill) with no new engine concept,
+  just new inputs to formulas that already exist.
+- [ ] **Reactive runes need genuinely new plumbing, not reuse**: a new
+  check against the *target's* equipped runes inside `attack_system`'s
+  damage-application step (today, effects only ever apply from the
+  attacker's own effect list) — required for Thurisaz (reactive
+  when-hit stun). Call this out explicitly during implementation; it's
+  the one piece of this milestone that isn't just wiring existing systems
+  together.
+- [ ] Starter rune roster (`.ron` content, ~8 to prove breadth): Kenaz,
+  Isaz, Thurisaz, Algiz (flat resistance), Sowilo (crit stat, tiered per
+  M8.11), Tiwaz (Od-cost-for-damage tradeoff), Ansuz (Od regen), Fehu
+  (bonus currency on kill) — see `MECHANICS.md` for each — plus at least
+  one authored bind recipe combining two or three of these into a unique
+  result.
+- [ ] Tests: recipe matching (order-independent), reveal-once-then-shown
+  behavior, unknown-combination rejection, reactive-rune trigger-on-being-
+  hit (not on landing a hit).
+
+## M8.13 — Stateful inventory: keys & artifacts
+
+- [ ] `content::KeyItemTemplate` (id, display name, flavor text,
+  `consumed_on_use: bool`) — loaded into a `KeyItemLibrary`, same shape
+  as `ItemLibrary`/`RuneLibrary`.
+- [ ] `KeyItems(HashSet<String>)` player component — possession-by-presence,
+  same pattern as `KnownRunes`/`KnownSkills`/`DiscoveredRunes`. Replicated,
+  and folded into `CharacterSave` alongside the rest of persisted
+  progression state.
+- [ ] `DroppedLoot::KeyItem(String)` — new branch on the existing enum,
+  merged into `KeyItems` on pickup exactly like items/runes/currency
+  today. `LootTable`'s `LootKind` gains a matching variant, so a boss (or
+  any enemy/destructible from M8.9) can drop one directly.
+- [ ] `Unlockable` (M8.9) gains its anticipated second condition variant:
+  `UnlockCondition::HasKeyItem(String)`. Interacting with a locked gate
+  checks possession against **all** of its conditions (AND semantics,
+  already established in M8.9); if the matching template is
+  `consumed_on_use`, remove it from `KeyItems` on success. Requiring more
+  than one key item at a single gate — including from different party
+  members — needs no new engineering, just authoring more than one
+  condition.
+- [ ] Inventory panel (M8): a small "Key Items" section listing possessed
+  keys/artifacts by flavor text — extends the existing panel rather than
+  a new screen.
+- [ ] A couple of real content examples: one dungeon-scoped consumable key
+  + one boss-dropped persistent artifact, to prove both branches of
+  `consumed_on_use`.
+- [ ] Tests: consumable key removed after successful unlock, artifact
+  retained after unlock, multi-condition gate requiring more than one key
+  item, gate correctly staying locked when any one condition fails.
+
 ## M9 — Objectives & first dungeon content
 - [ ] Hand-authored dungeon instance, entered explicitly from the overworld
 - [ ] One full objective sequence, tier-1 enemies only
