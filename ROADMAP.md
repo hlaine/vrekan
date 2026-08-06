@@ -610,7 +610,17 @@ particles have no gameplay effect to authorize or keep in sync).
     panel, Party window all clicked with the light active), not just
     visible. This is the same class of bug M8's `EguiPrimaryContextPass`
     issue was; a screenshot alone would not have caught a regression here.
-  - [ ] Shadow-casting occluders not added yet (next step).
+  - [x] First shadow-casting occluder: `cast_shadows: true` on the test
+    light, plus one placeholder "pillar" (`Mesh2d`/`ColorMaterial`
+    rectangle) with `LightOccluder2d::default()` (shape-based occlusion —
+    the default empty `occluder_mask` falls back to the attached mesh's
+    own shape). Deliberately capped at one occluder given the open
+    upstream perf issue — measured a real frame time before considering
+    more: a temporary `FrameTimeDiagnosticsPlugin`/`LogDiagnosticsPlugin`
+    (added, measured, then removed — not left in the codebase) logged a
+    stable ~60 FPS / ~16.7ms frame time with the light, ambient light, and
+    occluder all active together, no concern at this count. **Confirmed
+    live**: the pillar casts a correctly-shaped shadow away from the light.
 - [x] Status indicators (downed/stunned/leash-warning) redesigned off
   `Sprite.color` onto a gizmo overlay, so the base sprite color is free
   for the lighting system (and later, real textures) to own. Old

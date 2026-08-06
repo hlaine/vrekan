@@ -345,7 +345,12 @@ fn main() {
         .run();
 }
 
-fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_scene(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
     // Lighting2dSettings/AmbientLight2d are read by bevy_lit's Lighting2dPlugin —
     // M8.5's lighting foundation, added so sprite/tile colors can be chosen
     // against real lighting before any real art exists. Defaults for both
@@ -372,9 +377,23 @@ fn setup_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
             inner_radius: 20.0,
             outer_radius: 200.0,
             falloff: 3.0,
-            cast_shadows: false,
+            cast_shadows: true,
         },
         Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+
+    // First shadow-casting occluder — a placeholder "pillar" mesh, not real
+    // art, purely to confirm `LightOccluder2d` casts a correctly-shaped
+    // shadow (M8.5 step 8). Deliberately capped at one occluder this pass:
+    // bevy_lit has an open upstream issue reporting heavy performance cost
+    // from `LightOccluder2d` even without `cast_shadows` enabled, so
+    // occluder count needs to stay small and tested, not assumed free —
+    // see the frame-time check this step's playtest records.
+    commands.spawn((
+        Mesh2d(meshes.add(Rectangle::new(20.0, 60.0))),
+        MeshMaterial2d(materials.add(Color::srgb(0.4, 0.4, 0.4))),
+        LightOccluder2d::default(),
+        Transform::from_xyz(60.0, 0.0, 0.0),
     ));
 
     commands.spawn((
