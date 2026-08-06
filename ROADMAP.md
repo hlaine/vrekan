@@ -634,7 +634,7 @@ particles have no gameplay effect to authorize or keep in sync).
   **Confirmed live**: player sprite stays its normal color at all times;
   a yellow ring appears around a stunned player and disappears once the
   stun wears off.
-- [ ] `bevy_hanabi` added (client-only) for GPU particle effects: sparks/
+- [x] `bevy_hanabi` added (client-only) for GPU particle effects: sparks/
   glow at torches, placed via a new Tiled object layer, read purely
   client-side (no server involvement — cosmetic only).
   - [x] Torch placement + lighting shipped: new `"ambience"` Tiled object
@@ -661,7 +661,24 @@ particles have no gameplay effect to authorize or keep in sync).
       component instead, which holds the plain `"torch"` string. Found
       via a live debug print after the first attempt rendered nothing,
       not guessed at.
-    Particle effects (sparks/glow) still to come.
+  - [x] `bevy_hanabi` `=0.19.0` added to `client` only, `default-features =
+    false, features = ["2d"]` (the project has no 3D rendering; upstream
+    defaults are 3D-oriented) — resolvable version verified via `cargo add
+    --dry-run --no-default-features --features 2d` before pinning, `cargo
+    tree -p server` confirmed no leak. `HanabiPlugin` registered; a shared
+    `torch_spark` `EffectAsset` (radial-drift spark/glow, modeled on
+    `bevy_hanabi`'s own `examples/2d.rs` shape rather than a hand-authored
+    directional "rising ember" — not worth the extra `ExprWriter`
+    complexity for this placeholder pass) built once in `setup_scene` and
+    stored in a `TorchSparkEffect` resource, attached via
+    `ParticleEffect::new(...)` to each torch entity alongside its
+    `PointLight2d` in `spawn_torch_lights`. One incidental fix: `Gradient`
+    is ambiguous between `bevy::ui::Gradient` and `bevy_hanabi::Gradient`
+    with both preludes in scope — resolved by fully qualifying
+    `bevy_hanabi::Gradient`. **Confirmed live**: warm sparks trickle
+    outward from both torches alongside the existing glow; all egui panels
+    remained fully clickable with both `bevy_lit` and `bevy_hanabi` active
+    together.
 - [ ] A lighting/ambience debug panel: sliders for ambient and point-light
   color/intensity/radius — the actual sandbox for picking sprite/tile
   colors against real lighting before any art exists.

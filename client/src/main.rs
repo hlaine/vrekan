@@ -12,6 +12,7 @@ use bevy_ecs_tiled::prelude::{
 };
 use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use bevy_hanabi::prelude::*;
 use bevy_lit::prelude::*;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
@@ -168,6 +169,18 @@ const STATUS_RING_RADIUS: f32 = 20.0;
 const TORCH_OBJECT_NAME: &str = "torch";
 const TORCH_LIGHT_COLOR: Color = Color::srgb(1.0, 0.6, 0.2);
 
+// Tuning for `build_torch_spark_effect` — small/cheap on purpose (M8.5 is
+// a foundation pass, not a final-art effect budget). `SPARK_CAPACITY` caps
+// how many particles a single effect instance can have alive at once
+// (rate * lifetime gives the steady-state count; capacity just needs to
+// comfortably exceed that).
+const SPARK_SPAWN_RATE: f32 = 8.0;
+const SPARK_LIFETIME_SECS: f32 = 1.0;
+const SPARK_CAPACITY: u32 = 64;
+const SPARK_SPAWN_RADIUS: f32 = 3.0;
+const SPARK_SPEED: f32 = 25.0;
+const SPARK_SIZE: f32 = 2.0;
+
 // This client's persistent character identity, generated once and reused
 // across runs — not tied to any account system (see DECISIONS.md's
 // identity-model entry). Relative to CWD, matching the project's existing
@@ -234,6 +247,12 @@ struct ItemTemplates(Vec<(String, ItemTemplate)>);
 /// each vendor has its own stock.
 #[derive(Resource)]
 struct VendorTemplates(Vec<(String, VendorTemplate)>);
+
+/// Handle to the shared spark/glow `EffectAsset` every torch attaches —
+/// built once in `setup_scene`, reused by every torch instance rather
+/// than each building its own copy of the same effect.
+#[derive(Resource, Clone)]
+struct TorchSparkEffect(Handle<EffectAsset>);
 
 /// Which panel(s) `interaction_trigger_system` has opened. Unlike M8's
 /// original single-panel design, one `Interactable` can declare more than
@@ -304,6 +323,7 @@ fn main() {
         .add_plugins(TiledPlugin::default())
         .add_plugins(EguiPlugin::default())
         .add_plugins(Lighting2dPlugin)
+        .add_plugins(HanabiPlugin)
         .init_resource::<DeltaSeconds>()
         .init_resource::<LocalPlayer>()
         .init_resource::<InventoryOpen>()
@@ -360,6 +380,7 @@ fn setup_scene(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut effects: ResMut<Assets<EffectAsset>>,
 ) {
     // Lighting2dSettings/AmbientLight2d are read by bevy_lit's Lighting2dPlugin —
     // M8.5's lighting foundation, added so sprite/tile colors can be chosen
@@ -405,6 +426,8 @@ fn setup_scene(
         LightOccluder2d::default(),
         Transform::from_xyz(60.0, 0.0, 0.0),
     ));
+
+    commands.insert_resource(TorchSparkEffect(build_torch_spark_effect(&mut effects)));
 
     commands.spawn((
         TiledMap(asset_server.load(MAP_PATH)),
@@ -604,26 +627,28 @@ fn init_replicated_interactables(
 
 /// Reads `bevy_ecs_tiled`'s `ObjectCreated` events for the map's
 /// "ambience" object layer and turns each named `TORCH_OBJECT_NAME`
-/// object into a `PointLight2d` — purely cosmetic, so this reads the
-/// client's own already-loaded copy of the Tiled map data directly rather
-/// than needing any server involvement or replication (same "visual
-/// layers are client-only, unlike the server-authoritative collision
-/// layer" split `DECISIONS.md`'s M8.5 entry documents). `bevy_ecs_tiled`
-/// already spawns a correctly-positioned entity (with `Transform`, world
-/// coordinates already resolved — empirically confirmed to land at
-/// exactly `(tiled_x, -tiled_y)`, the same convention `server`'s manual
-/// object parsing uses) per Tiled object, so this just inserts a light
-/// onto that same entity instead of spawning a separate one or
-/// re-deriving world coordinates by hand. Matches on the object's
-/// `TiledName` component, **not** its `Name` — `bevy_ecs_tiled` sets
-/// `Name` to a wrapped `"Point(torch)"`-style string (shape kind included)
-/// for debugging purposes, and `TiledName` is the one holding the raw
-/// Tiled object name (`"torch"`) — found via a live debug print after an
-/// exact-match on `Name` silently matched nothing, not assumed.
+/// object into a `PointLight2d` + a `bevy_hanabi` spark/glow
+/// `ParticleEffect` — purely cosmetic, so this reads the client's own
+/// already-loaded copy of the Tiled map data directly rather than needing
+/// any server involvement or replication (same "visual layers are
+/// client-only, unlike the server-authoritative collision layer" split
+/// `DECISIONS.md`'s M8.5 entry documents). `bevy_ecs_tiled` already spawns
+/// a correctly-positioned entity (with `Transform`, world coordinates
+/// already resolved — empirically confirmed to land at exactly
+/// `(tiled_x, -tiled_y)`, the same convention `server`'s manual object
+/// parsing uses) per Tiled object, so this just inserts both onto that
+/// same entity instead of spawning separate ones or re-deriving world
+/// coordinates by hand. Matches on the object's `TiledName` component,
+/// **not** its `Name` — `bevy_ecs_tiled` sets `Name` to a wrapped
+/// `"Point(torch)"`-style string (shape kind included) for debugging
+/// purposes, and `TiledName` is the one holding the raw Tiled object name
+/// (`"torch"`) — found via a live debug print after an exact-match on
+/// `Name` silently matched nothing, not assumed.
 fn spawn_torch_lights(
     mut commands: Commands,
     mut object_events: MessageReader<TiledEvent<ObjectCreated>>,
     names: Query<&TiledName, With<TiledObject>>,
+    spark_effect: Res<TorchSparkEffect>,
 ) {
     for event in object_events.read() {
         let Ok(name) = names.get(event.origin) else {
@@ -632,15 +657,68 @@ fn spawn_torch_lights(
         if name.0 != TORCH_OBJECT_NAME {
             continue;
         }
-        commands.entity(event.origin).insert(PointLight2d {
-            color: TORCH_LIGHT_COLOR,
-            intensity: 1.5,
-            inner_radius: 15.0,
-            outer_radius: 150.0,
-            falloff: 4.0,
-            cast_shadows: false,
-        });
+        commands.entity(event.origin).insert((
+            PointLight2d {
+                color: TORCH_LIGHT_COLOR,
+                intensity: 1.5,
+                inner_radius: 15.0,
+                outer_radius: 150.0,
+                falloff: 4.0,
+                cast_shadows: false,
+            },
+            ParticleEffect::new(spark_effect.0.clone()),
+        ));
     }
+}
+
+/// Builds the shared spark/glow `EffectAsset` every torch attaches: a
+/// low-rate trickle of small particles drifting radially outward from the
+/// torch tip, fading from opaque orange to transparent yellow over a
+/// short lifetime — a placeholder ember/spark look, not final art (M8.5's
+/// whole point is having *something* tunable before real art exists, see
+/// the debug panel this milestone also adds). Mirrors `bevy_hanabi`
+/// 0.19.0's own `examples/2d.rs` shape (`SetPositionCircleModifier` +
+/// `SetVelocityCircleModifier` on the Z axis, i.e. radial drift in the
+/// world's XY plane) rather than a directional "rising ember" effect —
+/// the available modifiers make radial drift the straightforward option;
+/// a biased-upward drift would need hand-writing an expression via
+/// `ExprWriter`, not worth the complexity for a placeholder pass.
+fn build_torch_spark_effect(effects: &mut Assets<EffectAsset>) -> Handle<EffectAsset> {
+    let mut color_gradient = bevy_hanabi::Gradient::new();
+    color_gradient.add_key(0.0, Vec4::new(1.0, 0.6, 0.1, 1.0));
+    color_gradient.add_key(1.0, Vec4::new(1.0, 0.9, 0.3, 0.0));
+
+    let writer = ExprWriter::new();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let init_lifetime =
+        SetAttributeModifier::new(Attribute::LIFETIME, writer.lit(SPARK_LIFETIME_SECS).expr());
+    let init_pos = SetPositionCircleModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        radius: writer.lit(SPARK_SPAWN_RADIUS).expr(),
+        dimension: ShapeDimension::Surface,
+    };
+    let init_vel = SetVelocityCircleModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        speed: writer.lit(SPARK_SPEED).expr(),
+    };
+    let module = writer.finish();
+
+    let spawner = SpawnerSettings::rate(SPARK_SPAWN_RATE.into());
+    effects.add(
+        EffectAsset::new(SPARK_CAPACITY, spawner, module)
+            .with_name("torch_spark")
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
+            .init(init_lifetime)
+            .render(SizeOverLifetimeModifier {
+                gradient: bevy_hanabi::Gradient::constant(Vec3::splat(SPARK_SIZE)),
+                screen_space_size: false,
+            })
+            .render(ColorOverLifetimeModifier::new(color_gradient)),
+    )
 }
 
 fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
