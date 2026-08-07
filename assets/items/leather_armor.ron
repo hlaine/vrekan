@@ -2,4 +2,8 @@
     slot: Armor,
     socket_count: 1,
     sell_value: 15,
+    // Modest flat resistance — tuning data, not final numbers.
+    resistances: {
+        "primal": 0.05,
+    },
 )

@@ -44,15 +44,25 @@ should mean a new data entry, not new engine code for that specific effect.
 
 **Facing direction.** Every player *and enemy* has a facing direction
 derived from their last non-zero movement (WASD for players, the AI's own
-chase movement for enemies), holding the last facing while stationary or
-attacking — server-authoritative and replicated, not client-inferred,
-consistent with movement itself being server-resolved (see `DESIGN.md`'s
-Camera & movement section). This is what "aimed" means in `DESIGN.md`'s
-Core loop: no independent mouse-look for v1. Enemies use the exact same
-movement-derived mechanism as players, not target-tracking — an enemy
-stopped mid-attack keeps facing wherever it was last moving (typically
-still toward its target, since it just chased them there), rather than
-snapping to face its target directly.
+chase movement for enemies), holding the last facing while stationary —
+server-authoritative and replicated, not client-inferred, consistent with
+movement itself being server-resolved (see `DESIGN.md`'s Camera & movement
+section). This is what "aimed" means in `DESIGN.md`'s Core loop: no
+independent mouse-look for v1.
+
+**Exception, added in M8.6 alongside directional melee arcs:** an enemy
+snaps its facing directly toward the player it's attacking at the instant
+it issues that attack (`game_core::enemy::ai_system`), overriding whatever
+movement-derived facing is left over from its chase. Before directional
+(cone-gated) attacks existed, an enemy's stale facing while stationary and
+attacking was harmless — omnidirectional hit detection didn't care which
+way it faced. Once attacks became cone-gated (see Weapons & attack timing
+below), a stale facing would make an enemy whiff a target that circled
+around it after the chase ended, which reads as a bug, not a readable
+telegraph. Players have no equivalent exception: a player's facing is
+still purely WASD-derived, since directly controlling facing is already
+the player's own input, not something that needs to be pinned to a locked
+attack target the way an AI's is.
 
 **Attack range/shape stays pure math, not physics colliders.** Melee (and
 later ranged) hit detection is a distance check — and, once directional
@@ -94,11 +104,13 @@ effective_recovery = base_recovery / (1.0 + attack_speed_bonus)
 recovery** — a starting assumption reinforcing the telegraph-read design
 above, not yet confirmed live.
 
-**Directional (cone) melee arcs**, gated by `Facing`, are in scope alongside
-weapon `range` becoming real content — resolving the previous open question
-about whether to move off the omnidirectional radius check. Whether AI-driven
-enemy attacks should also be cone-gated (enemies already carry `Facing`) or
-stay omnidirectional is still open — see Open questions.
+**Directional (cone) melee arcs**, gated by `Facing`, resolve the previous
+open question about whether to move off the omnidirectional radius check —
+both players and enemies are cone-gated (`game_core::combat::
+is_within_attack_arc`, a single fixed half-angle shared by every weapon for
+now, not yet a per-weapon content field), with enemies additionally
+snapping facing to their target at the moment of attack so the cone-gate
+doesn't make them whiff — see the Facing section above.
 
 **Armor and Helmet items grant a flat resistance % per `DamageType`** —
 using the same `DamageType`-keyed shape `Resistances` already uses, not the
@@ -438,11 +450,12 @@ top-of-screen boss health bar is boss-specific, unbuilt UI.
 - Whether the crit-before-resistance ordering feels right in practice.
 - Stacking rules for status effects may need per-effect-type refinement once
   a few real effects exist and can be tested together.
-- Whether AI-driven enemy attacks should also be gated by a facing-cone
-  (once built for players) or stay omnidirectional — enemies already carry
-  `Facing`, so this is purely about whether their own attacks respect it.
 - Whether being rooted during windup (vs. free to move) actually feels
   right once playable — a starting assumption, not confirmed live.
+- The shared fixed melee cone half-angle (~50 degrees, see
+  `game_core::combat::MELEE_ARC_HALF_ANGLE_RADIANS`) is tuning data, not a
+  per-weapon field yet — whether different weapon archetypes should get
+  different arc widths is unresolved.
 - Exact attack-speed-bonus and rune-magnitude-bonus curves (how Dexterity/
   Intelligence points convert to their respective bonus fractions) — tuning
   data, not derived here.

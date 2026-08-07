@@ -81,6 +81,13 @@ pub fn ai_system(
             *velocity = Velocity::toward(enemy_pos, player_pos, speed.0);
         } else {
             *velocity = Velocity::ZERO;
+            // Snap to face the target being attacked, overriding whatever
+            // stale movement-derived facing is left over from the chase —
+            // see MECHANICS.md's Facing section for why this exception
+            // exists: cone-gated melee (see `combat::attack_system`) would
+            // otherwise whiff a target the enemy isn't currently moving
+            // toward, e.g. one that circled around a stationary attacker.
+            facing.snap_toward(enemy_pos, player_pos);
             attack_events.write(AttackRequested { attacker: entity });
         }
         facing.update_from_direction(velocity.x, velocity.y);
@@ -167,6 +174,25 @@ mod tests {
             *world.get::<Facing>(enemy).unwrap(),
             Facing { x: 0.0, y: 1.0 }
         );
+    }
+
+    #[test]
+    fn enemy_snaps_facing_to_target_when_attacking_despite_stale_facing() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        // The player is directly above the enemy (melee range 1.0, distance
+        // 0.5), but the enemy's stale facing (from some earlier chase) still
+        // points to the right — it never moves this tick (already in
+        // range), so without the attack-time snap this would stay stale.
+        world.spawn((Player, Position { x: 0.0, y: 0.5 }));
+        let enemy = spawn_enemy(&mut world, Position { x: 0.0, y: 0.0 }, 20.0);
+        world.entity_mut(enemy).insert(Facing { x: 1.0, y: 0.0 });
+
+        let _ = world.run_system_once(ai_system);
+
+        let facing = *world.get::<Facing>(enemy).unwrap();
+        assert_eq!(facing.x, 0.0);
+        assert!(facing.y > 0.0);
     }
 
     #[test]

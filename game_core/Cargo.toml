@@ -8,3 +8,4 @@ license.workspace = true
 bevy_ecs = { workspace = true }
 serde = { workspace = true }
 rand = { workspace = true }
+tracing = { workspace = true }

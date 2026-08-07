@@ -140,3 +140,10 @@ and PR — see `CLAUDE.md` for the full verification-loop policy.
   binary). Using a faster linker (`lld` or `mold` on Linux) also helps.
 - The server never needs a GPU, audio device, or display — it's safe to run
   headless on a minimal machine or CI runner.
+- `game_core` carries a lightweight `tracing` dependency purely for
+  toggleable debug/trace logging (see `DECISIONS.md`'s M8.6 follow-up
+  entry) — silent by default, enabled via the standard `RUST_LOG` env var
+  since `server`/`client` already install the actual logging backend
+  through `bevy::log::LogPlugin`. E.g. to see player attack-resolution
+  detail (target search, windup start, hit resolution) while live-testing
+  combat: `RUST_LOG=info,game_core=debug cargo run -p server`.

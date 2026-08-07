@@ -716,52 +716,143 @@ Client/server split as usual — weapon stats and timing are simulation state
 `client`. See `MECHANICS.md`'s Weapons & attack timing section for the full
 mechanic shape this builds; the below is the build breakdown.
 
-- [ ] Weapon content schema: `ItemDefinition` (weapon-slot items) gains
-  `damage`, `damage_type`, `range`, `attack_duration`, `recovery` —
-  resolves `MECHANICS.md`'s long-standing "ranges are content data,
-  eventually" note for real.
-- [ ] Phased attack timing, replacing `MeleeAttack::cooldown`'s single flat
-  number: windup → damage resolves → recovery lockout. New phase
-  representation on/alongside `AttackTimer` (decide enum-state vs. two
-  timer fields when implementing). A windup in progress is cancelled
-  outright if the attacker becomes `Stunned`/`Downed`/dies before it
-  resolves.
-- [ ] Rooted during windup, free to move during recovery — see
-  `MECHANICS.md`; flag as a starting assumption in code comments, not a
-  silent behavior choice.
-- [ ] Derive the player's effective attack from their equipped weapon in
-  `attack_system`, computed fresh from `Equipment` + `ItemLibrary` each
-  time (same pattern as today's effective crit stats — never cached),
-  replacing the hardcoded `MeleeAttack` spawned in `server/src/main.rs`.
-  **Build the resistance and damage sums as open-ended from the start**
-  (a running total, not a fixed two-term formula) — M8.7 and M8.12 both
-  add further terms to these same sums later; see `MECHANICS.md`'s
-  "Effective combat values are always computed fresh" section.
-- [ ] **Also read socketed runes on the equipped weapon/armor into this
-  same effective-attack computation**, not just the base item template —
-  a dependency M8.12's rune-power runes (bonus damage, on-hit effects)
-  need satisfied here, even though no rune grants either yet at this
-  point in the sequence.
-- [ ] Unarmed fallback attack profile for an empty `Weapon` slot.
-- [ ] Armor/Helmet gain a real mechanical effect: flat resistance % per
-  `DamageType`, same `DamageType`-keyed shape `Resistances` already uses
-  (not the fixed `Stat` enum). Players gain a base (empty-by-default)
-  `Resistances` component, matching enemies; target-side resistance
-  lookup in `attack_system` becomes an effective (summed) value,
-  symmetric to the attacker-side effective `CombatStats` that already
-  exists.
-- [ ] A handful of real weapon `.ron` files with distinct archetypes (e.g.
-  fast/short/low-damage vs. slow/long/high-damage), plus at least one
-  armor and one helmet item with a real resistance bonus — proves the
-  schema via content, no engine changes, same test M2 used for enemies.
-- [ ] Directional (facing-cone) melee arcs, resolving `MECHANICS.md`'s
-  previously-open question, now that weapon `range` is real content data.
-  Split into its own follow-on if it threatens to bloat this milestone
-  once the above is actually built.
-- [ ] Tests: weapon-stat resolution, unarmed fallback, effective-resistance
-  math, windup/recovery phase transitions and interruption.
+**Implementation status: everything below except the HUD bullet is built,
+unit-tested, and passes the full verification loop (build/test/clippy/fmt).**
+Built autonomously (the user was away from their computer), then
+**confirmed live** afterward: a real server+client session, player attack
+resolution instrumented with temporary `tracing::debug!` logging (see the
+new `DECISIONS.md` logging entry) to verify hits actually landed and dealt
+damage, since this pass had no live coverage at build time. The user
+reported combat working (cone-gating/windup made a kill "difficult" but
+achievable — first live signal on how the new timing actually feels, not
+yet tuned against), plus pickups and dialogs (pre-existing M8 features,
+unaffected by this milestone) still working correctly. This was a
+single-client session, not a two-client co-op verification — the
+enemy-facing-snap and cone-gating haven't specifically been exercised
+against a second player's perspective yet. See `DECISIONS.md`'s M8.6 entry
+for the full design writeup, the decisions confirmed with the user before
+implementing, and known limitations.
+
+- [x] Weapon content schema: `ItemDefinition` gains `weapon:
+  Option<WeaponStats>` (`damage`/`damage_type`/`range`/`attack_duration`/
+  `recovery`, required and exclusively for `slot: Weapon` items — enforced
+  at content-load time via a new `ContentError::Validation`, not just a
+  convention) — resolves `MECHANICS.md`'s long-standing "ranges are content
+  data, eventually" note for real.
+- [x] Phased attack timing — player-only (see below), replacing
+  `MeleeAttack::cooldown`'s flat number with a new `game_core::AttackPhase`
+  enum (`Idle | Windup{remaining, target} | Recovery{remaining}`) and pure
+  `tick_attack_phase` transition function, in a new `game_core::
+  weapon_attack` module: windup → damage resolves → recovery lockout. A
+  windup in progress is cancelled outright (no hit, straight back to
+  `Idle`, not even entering `Recovery`) if the attacker is
+  `Stunned`/`Downed` when its tick runs — enemies have no use for this
+  since they never enter `AttackPhase` at all (see below), but a player who
+  dies mid-windup already can't act via the same mechanism.
+- [x] Rooted during windup, free to move during recovery — `server`'s
+  `apply_move_input` zeroes velocity while `AttackPhase::Windup`, flagged
+  in its doc comment as a starting assumption per `MECHANICS.md`, not
+  confirmed live.
+- [x] Derive the player's effective attack from their equipped weapon,
+  computed fresh from `Equipment` + `ItemLibrary` every attack (never
+  cached) via `game_core::effective_weapon_stats`, replacing the hardcoded
+  `MeleeAttack` previously spawned in `server/src/main.rs` (its
+  `PLAYER_ATTACK_*`/`PLAYER_FURY_*` constants removed entirely). Both the
+  damage sum (crit stats) and the resistance sum are built open-ended, as
+  requested — `resolve_melee_hit`'s effective-`CombatStats`/effective-
+  `Resistances` construction stays a plain sum of named terms, ready for
+  M8.7/M8.12 to add more without restructuring.
+  **Found via review, fixed before this could ship as a silent bug:** the
+  first pass built `Equipment::resistance_bonus` and wired
+  `Resistances::default()` onto the player spawn, but never actually
+  called `resistance_bonus` from damage resolution — exactly the "stat
+  exists but does nothing" class MECHANICS.md's "Effective combat values
+  are always computed fresh" section warns about by name. Caught while
+  writing this changelog entry, not by a test failure; fixed by threading
+  `target_equipment`/`ItemLibrary` into `resolve_melee_hit` and adding
+  `attack_system_applies_the_targets_equipped_armor_resistance`, which
+  would have failed had the bug still been present.
+- [x] **`resolve_melee_hit`, a new shared helper factored out of
+  `attack_system`'s hit-resolution body**, used by both the enemy path
+  (`AttackTimer`, unchanged behavior — the full existing test suite passes
+  byte-for-byte after the extraction) and the new player path
+  (`AttackPhase`), so the two attacker-timing models can't silently diverge
+  on crit/resistance/XP/Od/effect resolution. A second real gap found the
+  same way as the resistance one: the player path's first draft passed a
+  throwaway empty `RuneLibrary::default()` into this helper instead of the
+  real resource, which would have silently disabled socketed-rune crit
+  bonuses on player attacks specifically (enemies never socket runes, so
+  this wouldn't have shown up there) — fixed alongside it.
+- [x] Also reads socketed runes on the equipped weapon/armor into the
+  effective-attack computation, via the existing `Equipment::stat_bonus`
+  plumbing `resolve_melee_hit` already calls — no rune grants bonus damage
+  or an on-hit effect yet (that's M8.12), so there's nothing new to
+  observe from this bullet specifically yet, but the read path is real and
+  exercised by existing socketed-rune crit tests.
+- [x] Unarmed fallback: `game_core::unarmed_weapon_stats()`, a single named
+  function (not inline defaults duplicated at each call site) that
+  `effective_weapon_stats` falls back to for an empty `Weapon` slot or an
+  equipped item whose template is unknown to `ItemLibrary`.
+- [x] Armor/Helmet gain a real mechanical effect: `ItemDefinition` gains
+  `resistances: Resistances` (enforced empty for `Weapon` items at
+  content-load time, same validation as the `weapon` field), summed across
+  equipped slots via `Equipment::resistance_bonus`. Players gain a base
+  `Resistances::default()` component on spawn, matching enemies.
+- [x] Real weapon `.ron` archetypes: `rusty_sword` (fast/light — 8 damage,
+  55 range, 0.25s windup, 0.4s recovery) and `steel_sword` (slow/heavy —
+  16 damage, 65 range, 0.4s windup, 0.65s recovery), both in
+  `assets/items/`. `leather_armor`/`wolf_pelt_cap` each gained a modest
+  `primal` resistance. All four numbers are tuning data, not final.
+- [x] Directional (facing-cone) melee arcs: `game_core::combat::
+  is_within_attack_arc` (a single fixed half-angle,
+  `MELEE_ARC_HALF_ANGLE_RADIANS`, shared by every weapon for now — not yet
+  a per-weapon field), wired into both `attack_system`'s nearest-target
+  search (enemies) and the new `weapon_attack::find_attack_target`
+  (players). **User's explicit call, against the initial recommendation**
+  (see `DECISIONS.md`): both players *and* enemies are cone-gated, not
+  players only — which in turn required a real behavior addition beyond
+  the original scope of this bullet, `game_core::enemy::ai_system` now
+  snaps an attacking enemy's `Facing` directly at its target the instant
+  it issues that attack, overriding whatever stale movement-derived facing
+  is left over from its chase (see `MECHANICS.md`'s Facing section for the
+  documented exception this carves out of the "purely movement-derived"
+  rule that's held since M4). Existing `attack_system` tests needed
+  `Facing` added to their attacker fixtures — every existing test target
+  happened to already sit along the attacker's `+X` axis, so this was a
+  mechanical fixture update, not a rewrite of test intent; two new
+  `attack_system` tests (`_whiffs_an_in_range_target_outside_the_facing_cone`
+  / `_hits_an_in_range_target_inside_the_facing_cone`) exercise the cone
+  itself directly, since the existing fixtures alone would have kept
+  passing even if the cone filter were silently broken.
+  Deliberately **out of scope, flagged not guessed**: cone-gating enemies
+  required this facing-snap, which was *not* originally part of this
+  bullet — surfaced as a required consequence during planning, confirmed
+  with the user, and folded in rather than silently decided.
+- [x] Tests: `game_core` gained ~30 new/changed tests across `combat.rs`
+  (cone math, `resolve_melee_hit`/`AttackerProgress` extraction, target
+  resistance), the new `weapon_attack.rs` module (phase transitions —
+  windup/recovery/cancellation/incapacitation, `effective_weapon_stats`
+  fallback chain, `find_attack_target`, both new systems via
+  `run_system_once`), `item.rs` (`Equipment::resistance_bonus`), and
+  `enemy.rs` (attack-time facing snap). `content::item` gained schema
+  validation tests (weapon-without-block, non-weapon-with-block,
+  weapon-with-resistances, all rejected; a well-formed pair accepted).
 - [ ] HUD: extend the existing attack-cooldown display to show windup vs.
-  recovery distinctly rather than one flat countdown.
+  recovery distinctly rather than one flat countdown. **Not done this
+  pass** — `AttackPhase` is deliberately not yet replicated (server-only
+  resolution state, mirroring `ActiveEffects`); a small replicated summary
+  for this display is the natural next sub-pass once this milestone is
+  live-tested.
+
+**A decision made explicitly, not assumed — phasing is player-only.**
+Enemies keep `AttackTimer`'s flat-cooldown resolution completely unchanged;
+`attack_system` (still the enemy-only resolution path now that players no
+longer carry `MeleeAttack`/`AttackTimer` at all) is otherwise untouched
+apart from the cone-gate addition above. Extending phased windup/recovery
+to enemies — which would need new `EnemyTemplate` content fields and an AI
+"committed to windup" behavior — is unblocked but not built here; see
+`DECISIONS.md`'s M8.6 entry for why this was scoped out rather than
+attempted alongside everything else in this pass.
 
 Deliberately deferred, unblocked but not built here: weapon *switching*
 (primary/secondary slots, the M8 TAB-selector deferral) — single-weapon

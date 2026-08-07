@@ -9,9 +9,11 @@ pub mod progression;
 pub mod revive;
 pub mod skill;
 pub mod status_effect;
+pub mod weapon_attack;
 
 pub use combat::{
-    AttackRequested, AttackTimer, CombatStats, DamageType, Health, MeleeAttack, Resistances,
+    is_within_attack_arc, AttackRequested, AttackTimer, CombatStats, DamageType, Health,
+    MeleeAttack, Resistances, MELEE_ARC_HALF_ANGLE_RADIANS,
 };
 pub use economy::{
     buy_item, sell_item, socketed_item_sell_value, Currency, VendorLibrary, VendorListing,
@@ -42,6 +44,10 @@ pub use skill::{
 pub use status_effect::{
     tick_status_effects, ActiveEffects, EffectDefinition, EffectKind, EffectTarget, StackMode,
     Stat, Stunned,
+};
+pub use weapon_attack::{
+    effective_weapon_stats, find_attack_target, start_player_windups, tick_player_attack_phases,
+    unarmed_weapon_stats, AttackPhase, AttackPhaseEvent, WeaponStats,
 };
 
 use bevy_ecs::prelude::*;

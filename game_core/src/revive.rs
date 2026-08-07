@@ -21,7 +21,12 @@ pub struct Reviving;
 pub struct ReviveProgress(pub f32);
 
 /// Distance within which a `Reviving` ally counts toward reviving a downed
-/// player — matches `PLAYER_ATTACK_RANGE` in `server`.
+/// player. Originally chosen to match the player's then-single fixed attack
+/// range (see DECISIONS.md's M4 entry); that range is equipment-dependent
+/// as of M8.6 (unarmed 40, rusty_sword 55, steel_sword 65 — see
+/// `weapon_attack::unarmed_weapon_stats`/`assets/items/*.ron`), so this is
+/// now just a plain standalone value in the same ballpark, not derived from
+/// any single weapon's range.
 pub const REVIVE_RANGE: f32 = 60.0;
 pub const REVIVE_DURATION_SECS: f32 = 3.0;
 /// Fraction of max health a revived player comes back with — see

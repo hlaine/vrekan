@@ -1317,3 +1317,139 @@ overwriting, per the `bevy_lit` conflict this milestone resolved. Real art
 (sprites/tiles) can now be color-chosen against actual ambient + point
 lighting via the debug panel, unblocking the graphics-design work this
 whole milestone existed to prepare for.
+
+## M8.6: weapon-driven combat — decisions confirmed before implementing,
+## built autonomously, and two real bugs caught before they shipped
+
+This milestone was scoped and implemented in one autonomous session (the
+user was unavailable to answer follow-up questions mid-session), following
+an explicit up-front decision round rather than guessing shapes that
+weren't settled — see `ROADMAP.md`'s M8.6 section for the full
+implementation writeup; this entry covers the *why* behind the choices and
+the two real correctness gaps caught along the way.
+
+**Decisions confirmed with the user before writing any code:**
+1. **Phasing (windup/recovery) is player-only.** Enemies keep
+   `combat::AttackTimer`'s flat-cooldown resolution completely unchanged.
+   The alternative (phasing both) would have forced every `EnemyTemplate`
+   `.ron` file to gain new fields and required deciding an AI
+   "committed to windup" behavior — real scope this milestone didn't need
+   to take on to prove the player-side mechanic.
+2. **Windup/recovery state is a single `AttackPhase` enum**
+   (`Idle | Windup{remaining, target} | Recovery{remaining}`), not two
+   loose `f32` fields alongside the old `AttackTimer`. An enum can't
+   represent the invalid state of being in both phases simultaneously; two
+   plain fields could only be kept mutually exclusive by convention.
+3. **Target locks in at windup-start**, re-validated (still has `Health`,
+   not vanished) but not re-selected at hit-resolution — a player who
+   commits to a swing doesn't have it silently retarget to something closer
+   that wandered in mid-animation.
+4. **Cone-gating applies to both players and enemies** — the one place the
+   user went against the initial recommendation (which was player-only, to
+   avoid touching `attack_system`'s already-shipped, live-tested enemy
+   path). This had a real, non-optional consequence: cone-gating enemies
+   without also fixing their facing would make them whiff constantly,
+   since `MECHANICS.md` had documented enemy `Facing` as purely
+   movement-derived since M4. Rather than silently deciding how to resolve
+   that tension, it was surfaced as a follow-up question and the user chose
+   to fold a narrow fix — an attack-time facing snap, not a rewrite of the
+   general facing system — into this same milestone. `MECHANICS.md`'s
+   Facing section now documents this as an explicit, narrow exception.
+
+**Why `attack_system`'s hit-resolution was extracted into a shared
+`resolve_melee_hit`, touching already-tested code deliberately.** The
+initial plan was to leave `attack_system` completely untouched and
+duplicate its crit/resistance/XP/effect logic for the new player path, to
+minimize risk to code that couldn't be live-verified this session. That
+was reconsidered: the duplication risk (two formulas silently drifting
+apart over time, exactly what MECHANICS.md's "Effective combat values are
+always computed fresh" section warns about) was judged worse than the
+extraction risk, given the *existing* `attack_system` test suite — every
+one of those tests still had to pass, unchanged, after the refactor, which
+is a strong behavior-preservation check even without a live playtest.
+`resolve_melee_hit`/`AttackerProgress` (`combat.rs`) is now the one place
+a landed hit resolves, called from both `attack_system` (enemies) and the
+new `weapon_attack::tick_player_attack_phases` (players).
+
+**Two real "stat exists but does nothing" bugs, caught before shipping, not
+after.** Both are exactly the bug class `MECHANICS.md` names explicitly
+(citing `Stats`' M5-era bonus fields sitting unread for a full milestone
+before M8 wired them in) — worth recording precisely because this pass had
+no live playtest to catch them the way that earlier bug eventually was:
+1. `Equipment::resistance_bonus` and the `Resistances::default()` component
+   on player spawn were both built, but the first pass never actually
+   *called* `resistance_bonus` from damage resolution — armor/helmet
+   resistance would have been completely inert. Caught while writing this
+   changelog entry (re-reading the roadmap bullet against the actual diff),
+   not by a failing test. Fixed by threading `target_equipment`/
+   `ItemLibrary` into `resolve_melee_hit`; a new test
+   (`attack_system_applies_the_targets_equipped_armor_resistance`) fails
+   without the fix and passes with it.
+2. The player attack path's first draft passed a throwaway
+   `RuneLibrary::default()` into `resolve_melee_hit` instead of the real
+   `Res<RuneLibrary>`, which would have silently disabled socketed
+   crit-chance/multiplier rune bonuses on player attacks specifically
+   (enemies never socket runes, so `attack_system`'s existing tests
+   wouldn't have caught this either — it was invisible to the whole
+   existing test suite). Caught in the same review pass as the resistance
+   bug; fixed by adding a real `Res<RuneLibrary>` parameter.
+
+Both bugs shared a root cause: new plumbing (`ItemLibrary`/`RuneLibrary`
+resources) needed by the new player path wasn't threaded all the way
+through on the first pass, and nothing forced a compile error because
+`Option`/`Default` made the gap type-check cleanly. Neither would have
+been caught by `cargo build`/`clippy` — only by a test written specifically
+against the missing behavior, or a live playtest. Worth remembering next
+time new cross-cutting plumbing (a `Res<T>` needed by a newly-shared
+helper) gets threaded through multiple call sites: verify each call site
+actually passes the *real* resource, not a structurally-valid placeholder.
+
+**Consequences / what's still open:**
+- **Confirmed live, single-client, after this milestone was built.** It was
+  implemented and fully verified (build/test/clippy/fmt, ~30 new/changed
+  tests) without a graphical session available, then actually played
+  afterward: player attacks instrumented with temporary debug logging (see
+  the logging entry below) confirmed hits were landing and dealing real
+  damage server-side, and the user confirmed combat was functional live
+  (cone-gating/windup made landing a kill "difficult" — a real first
+  feel-signal, not yet tuned against) alongside pickups/dialogs (unaffected
+  pre-existing M8 features). **Not yet co-op-verified with two clients** —
+  the enemy facing-snap and cone-gating haven't specifically been exercised
+  from a second player's perspective.
+- `AttackPhase` is deliberately not yet replicated — the HUD windup/
+  recovery display is explicitly deferred, not forgotten (see `ROADMAP.md`).
+- Enemy phasing (windup/recovery for enemy attacks) remains unbuilt and
+  unblocked, per decision #1 above.
+- The melee cone half-angle (`combat::MELEE_ARC_HALF_ANGLE_RADIANS`, ~50
+  degrees) is a single fixed value shared by every weapon — not yet a
+  per-weapon content field, flagged in `MECHANICS.md`'s Open questions.
+
+## Debug logging: `tracing` added to `game_core`, gated by `RUST_LOG` (M8.6 follow-up)
+
+While live-testing M8.6, ad hoc `eprintln!` debug prints (added to trace
+whether player attacks were finding targets/resolving hits) needed to
+become something toggleable rather than hand-added-and-removed each time.
+Confirmed with the user: add `tracing` (the lightweight macro facade, not
+`tracing-subscriber`) as a real dependency to `game_core`, pinned to
+`=0.1.44` — the exact version already resolved transitively via
+`bevy::log::LogPlugin`, confirmed via `cargo tree -p server` to still
+resolve to a single version, no duplicate. `server` already installs the
+actual subscriber/backend through `bevy::log::LogPlugin`, so `game_core`'s
+`tracing::debug!`/`trace!` calls "just work" and are filterable via the
+standard `RUST_LOG` env var (e.g. `RUST_LOG=game_core=debug cargo run -p
+server`) with zero custom on/off plumbing — off by default. The
+`start_player_windups`/`tick_player_attack_phases` debug prints added
+during this same testing session were converted to `tracing::debug!` calls
+rather than removed, since they're exactly the kind of "why didn't my
+attack land" instrumentation worth keeping available for future debugging.
+
+**Unrelated operational finding from the same session, worth remembering:**
+a server restart briefly panicked on `failed to read content file
+assets/vendors` — not a code bug. `server`'s asset paths (`ITEM_TEMPLATES_DIR`
+etc.) are relative to the process's current working directory, and an
+earlier `cd game_core && cargo add ...` in the same shell session had
+permanently changed that directory for every subsequent command (shell cwd
+persists across tool calls). Always run `cargo run -p server`/`cargo run -p
+client` from the repo root; prefer not to `cd` at all mid-session when
+relative-path-sensitive commands (like starting the server) are coming up
+later in the same session.

@@ -5,7 +5,7 @@ use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
 use crate::item::{roll_loot, Equipment, ItemDrop, ItemLibrary, LootTable, RuneLibrary};
-use crate::movement::Position;
+use crate::movement::{Facing, Position};
 use crate::player::{Downed, Player};
 use crate::progression::{grant_xp, Level, Stats, UnspentStatPoints, XpReward};
 use crate::skill::{Od, UnspentSkillPoints};
@@ -17,6 +17,15 @@ use crate::DeltaSeconds;
 /// other half being `skill::tick_od_regen`'s passive trickle. Tuning data,
 /// not a settled number.
 const OD_GAIN_PER_HIT: f32 = 5.0;
+
+/// Half-angle (radians) of a directional melee attack's frontal cone,
+/// measured from the attacker's `Facing` — see MECHANICS.md's directional
+/// melee arcs. A single fixed arc shared by every weapon for now (not yet a
+/// per-weapon content field); tuning data, not a settled number. ~50
+/// degrees half-angle (~100 degrees total). `pub`: the actual caller
+/// (`server`'s attack resolution) lands in a later M8.6 sub-pass, so this
+/// is unused outside tests until then.
+pub const MELEE_ARC_HALF_ANGLE_RADIANS: f32 = std::f32::consts::PI * 50.0 / 180.0;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Health {
@@ -135,6 +144,30 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
     }
 }
 
+/// Whether `target_pos` falls within the frontal attack cone
+/// `attacker_facing` defines from `attacker_pos`, at `half_angle_radians` —
+/// see MECHANICS.md's directional melee arcs. Purely angular: range stays a
+/// separate, unchanged distance check (see `attack_system`'s nearest-target
+/// search). A target at the exact same position as the attacker is always
+/// in-arc, since "facing" is meaningless at zero distance and rejecting it
+/// would make melee whiff a target standing directly on top of the attacker.
+pub fn is_within_attack_arc(
+    attacker_pos: &Position,
+    attacker_facing: &Facing,
+    target_pos: &Position,
+    half_angle_radians: f32,
+) -> bool {
+    let dx = target_pos.x - attacker_pos.x;
+    let dy = target_pos.y - attacker_pos.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq == 0.0 {
+        return true;
+    }
+    let len = len_sq.sqrt();
+    let dot = attacker_facing.x * (dx / len) + attacker_facing.y * (dy / len);
+    dot >= half_angle_radians.cos()
+}
+
 /// A downed or stunned entity can't attack — see `attack_system`. The
 /// `Level`/`UnspentStatPoints`/`UnspentSkillPoints` triple is `Option` since
 /// only players have them — used to grant XP on a killing blow, see
@@ -147,6 +180,7 @@ type Attackers<'w, 's> = Query<
     's,
     (
         &'static Position,
+        &'static Facing,
         &'static MeleeAttack,
         &'static CombatStats,
         &'static mut AttackTimer,
@@ -160,6 +194,135 @@ type Attackers<'w, 's> = Query<
     ),
     (Without<Downed>, Without<Stunned>),
 >;
+
+/// Bundles an attacker's `Option`-typed progression/resource state for
+/// `resolve_melee_hit` — only players have any of these (XP/stat/skill
+/// points on a killing blow, `Od` gain on any landed hit); enemies pass
+/// every field as `None`. One struct instead of four loosely-related
+/// `Option<&mut T>` parameters.
+pub struct AttackerProgress<'a> {
+    pub level: Option<&'a mut Level>,
+    pub stat_points: Option<&'a mut UnspentStatPoints>,
+    pub skill_points: Option<&'a mut UnspentSkillPoints>,
+    pub od: Option<&'a mut Od>,
+}
+
+/// Resolves a landed hit against `target`: effective crit stats (base +
+/// active effects + equipment + level points) and effective resistance
+/// (base + equipped armor/helmet, via `Equipment::resistance_bonus`), both
+/// computed fresh — see MECHANICS.md's "Effective combat values are always
+/// computed fresh" section — then `resolve_damage`, `Od` gain, an XP grant
+/// on a killing blow, and rolling+applying each of `effects` independently
+/// against its own `chance`. Returns `false` (no state changed) if `target`
+/// no longer has `Health` — already despawned, or otherwise gone. Both
+/// `attack_system` (target vanished between its nearest-target search and
+/// this call, same tick) and the player weapon-attack path (target vanished
+/// sometime during windup — see `AttackPhase::Windup`'s doc comment) can hit
+/// this.
+///
+/// Shared by both attacker-timing models (`AttackTimer`'s flat cooldown for
+/// enemies, `AttackPhase`'s windup/recovery for players, see MECHANICS.md's
+/// Weapons & attack timing section) so the two can't silently diverge on how
+/// a hit actually resolves. The caller owns setting its own post-hit timing
+/// state (`timer.0 = melee.cooldown` or entering `Recovery`), which differs
+/// per model and so stays outside this function.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_melee_hit(
+    attacker: Entity,
+    target: Entity,
+    base_damage: f32,
+    damage_type: &DamageType,
+    effects: &[EffectDefinition],
+    attacker_stats: &CombatStats,
+    attacker_equipment: Option<&Equipment>,
+    attacker_level_stats: Option<&Stats>,
+    mut attacker_progress: AttackerProgress,
+    target_equipment: Option<&Equipment>,
+    items: &ItemLibrary,
+    healths: &mut Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
+    all_effects: &mut Query<&mut ActiveEffects>,
+    runes: &RuneLibrary,
+    rng: &mut impl Rng,
+) -> bool {
+    let Ok((mut health, resistances, xp_reward)) = healths.get_mut(target) else {
+        return false;
+    };
+    let no_resistances = Resistances::default();
+    let resistances = resistances.unwrap_or(&no_resistances);
+    let Ok([mut attacker_effects, mut target_effects]) =
+        all_effects.get_many_mut([attacker, target])
+    else {
+        return false;
+    };
+    let equipment_crit_chance = attacker_equipment
+        .map(|equipment| equipment.stat_bonus(Stat::CritChance, runes))
+        .unwrap_or(0.0);
+    let equipment_crit_multiplier = attacker_equipment
+        .map(|equipment| equipment.stat_bonus(Stat::CritMultiplier, runes))
+        .unwrap_or(0.0);
+    let level_crit_chance = attacker_level_stats
+        .map(|stats| stats.bonus_crit_chance)
+        .unwrap_or(0.0);
+    let level_crit_multiplier = attacker_level_stats
+        .map(|stats| stats.bonus_crit_multiplier)
+        .unwrap_or(0.0);
+    let effective_stats = CombatStats {
+        crit_chance: attacker_stats.crit_chance
+            + attacker_effects.stat_bonus(Stat::CritChance)
+            + equipment_crit_chance
+            + level_crit_chance,
+        crit_multiplier: attacker_stats.crit_multiplier
+            + attacker_effects.stat_bonus(Stat::CritMultiplier)
+            + equipment_crit_multiplier
+            + level_crit_multiplier,
+    };
+    let equipment_resistance = target_equipment
+        .map(|equipment| equipment.resistance_bonus(damage_type, items))
+        .unwrap_or(0.0);
+    let effective_resistances = Resistances(
+        [(
+            damage_type.clone(),
+            resistances.get(damage_type) + equipment_resistance,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let amount = resolve_damage(
+        base_damage,
+        damage_type,
+        &effective_stats,
+        &effective_resistances,
+        rng,
+    );
+    apply_damage(&mut health, amount);
+
+    if let Some(od) = attacker_progress.od.as_deref_mut() {
+        od.gain(OD_GAIN_PER_HIT);
+    }
+
+    if health.is_dead() {
+        if let (Some(xp_reward), Some(level), Some(stat_points), Some(skill_points)) = (
+            xp_reward,
+            attacker_progress.level.as_deref_mut(),
+            attacker_progress.stat_points.as_deref_mut(),
+            attacker_progress.skill_points.as_deref_mut(),
+        ) {
+            grant_xp(level, stat_points, skill_points, xp_reward.0);
+        }
+    }
+
+    for effect in effects {
+        if !rng.random_bool(effect.chance as f64) {
+            continue;
+        }
+        match effect.applies_to {
+            EffectTarget::Target => target_effects.apply(effect.clone()),
+            EffectTarget::Attacker => attacker_effects.apply(effect.clone()),
+        }
+    }
+
+    true
+}
 
 /// A downed entity can't be targeted — see `attack_system`. A *stunned*
 /// entity, unlike a downed one, stays targetable: it can't act, but it
@@ -203,18 +366,26 @@ type AttackTargets<'w, 's> =
 /// enemies have no use for XP. Killing-blow-only credit, not shared across
 /// the party (see MECHANICS.md's Progression section — a starting rule,
 /// not a settled one).
+// A Bevy system's flat Query/Res parameter list is the idiomatic shape —
+// bundling them into a struct just to satisfy this lint would be a real
+// regression in clarity, same false-positive `resolve_melee_hit` already
+// carries this exact allow for.
+#[allow(clippy::too_many_arguments)]
 pub fn attack_system(
     mut events: MessageReader<AttackRequested>,
     mut attackers: Attackers,
     targets: AttackTargets,
+    targets_equipment: Query<&Equipment>,
     mut healths: Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     mut all_effects: Query<&mut ActiveEffects>,
     runes: Res<RuneLibrary>,
+    items: Res<ItemLibrary>,
 ) {
     let mut rng = rand::rng();
     for event in events.read() {
         let Ok((
             attacker_pos,
+            attacker_facing,
             melee,
             attacker_stats,
             mut timer,
@@ -238,6 +409,14 @@ pub fn attack_system(
             .filter(|(entity, _, _)| *entity != event.attacker)
             .filter(|(_, _, target_is_player)| !(attacker_is_player && *target_is_player))
             .filter(|(_, pos, _)| attacker_pos.distance(pos) <= melee.range)
+            .filter(|(_, pos, _)| {
+                is_within_attack_arc(
+                    attacker_pos,
+                    attacker_facing,
+                    pos,
+                    MELEE_ARC_HALF_ANGLE_RADIANS,
+                )
+            })
             .min_by(|(_, a, _), (_, b, _)| {
                 attacker_pos
                     .distance(a)
@@ -249,75 +428,31 @@ pub fn attack_system(
             continue;
         };
 
-        if let Ok((mut health, resistances, xp_reward)) = healths.get_mut(target) {
-            let no_resistances = Resistances::default();
-            let resistances = resistances.unwrap_or(&no_resistances);
-            let Ok([mut attacker_effects, mut target_effects]) =
-                all_effects.get_many_mut([event.attacker, target])
-            else {
-                continue;
-            };
-            let equipment_crit_chance = attacker_equipment
-                .map(|equipment| equipment.stat_bonus(Stat::CritChance, &runes))
-                .unwrap_or(0.0);
-            let equipment_crit_multiplier = attacker_equipment
-                .map(|equipment| equipment.stat_bonus(Stat::CritMultiplier, &runes))
-                .unwrap_or(0.0);
-            let level_crit_chance = attacker_level_stats
-                .map(|stats| stats.bonus_crit_chance)
-                .unwrap_or(0.0);
-            let level_crit_multiplier = attacker_level_stats
-                .map(|stats| stats.bonus_crit_multiplier)
-                .unwrap_or(0.0);
-            let effective_stats = CombatStats {
-                crit_chance: attacker_stats.crit_chance
-                    + attacker_effects.stat_bonus(Stat::CritChance)
-                    + equipment_crit_chance
-                    + level_crit_chance,
-                crit_multiplier: attacker_stats.crit_multiplier
-                    + attacker_effects.stat_bonus(Stat::CritMultiplier)
-                    + equipment_crit_multiplier
-                    + level_crit_multiplier,
-            };
-            let amount = resolve_damage(
-                melee.damage,
-                &melee.damage_type,
-                &effective_stats,
-                resistances,
-                &mut rng,
-            );
-            apply_damage(&mut health, amount);
+        let progress = AttackerProgress {
+            level: attacker_level.map(|level| level.into_inner()),
+            stat_points: attacker_stat_points.map(|points| points.into_inner()),
+            skill_points: attacker_skill_points.map(|points| points.into_inner()),
+            od: attacker_od.map(|od| od.into_inner()),
+        };
+        let hit = resolve_melee_hit(
+            event.attacker,
+            target,
+            melee.damage,
+            &melee.damage_type,
+            &melee.effects,
+            attacker_stats,
+            attacker_equipment,
+            attacker_level_stats,
+            progress,
+            targets_equipment.get(target).ok(),
+            &items,
+            &mut healths,
+            &mut all_effects,
+            &runes,
+            &mut rng,
+        );
+        if hit {
             timer.0 = melee.cooldown;
-
-            if let Some(mut od) = attacker_od {
-                od.gain(OD_GAIN_PER_HIT);
-            }
-
-            if health.is_dead() {
-                if let (
-                    Some(xp_reward),
-                    Some(mut level),
-                    Some(mut stat_points),
-                    Some(mut skill_points),
-                ) = (
-                    xp_reward,
-                    attacker_level,
-                    attacker_stat_points,
-                    attacker_skill_points,
-                ) {
-                    grant_xp(&mut level, &mut stat_points, &mut skill_points, xp_reward.0);
-                }
-            }
-
-            for effect in &melee.effects {
-                if !rng.random_bool(effect.chance as f64) {
-                    continue;
-                }
-                match effect.applies_to {
-                    EffectTarget::Target => target_effects.apply(effect.clone()),
-                    EffectTarget::Attacker => attacker_effects.apply(effect.clone()),
-                }
-            }
         }
     }
 }
@@ -493,10 +628,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -539,10 +676,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -583,15 +722,82 @@ mod tests {
     }
 
     #[test]
+    fn attack_system_applies_the_targets_equipped_armor_resistance() {
+        use crate::item::{EquipSlot, Item, ItemDefinition};
+
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+        let mut items = ItemLibrary::default();
+        items.0.insert(
+            "plate".to_string(),
+            ItemDefinition {
+                slot: EquipSlot::Armor,
+                socket_count: 0,
+                sell_value: 5,
+                weapon: None,
+                resistances: Resistances(HashMap::from([(primal(), 0.5)])),
+            },
+        );
+        world.insert_resource(items);
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(100.0),
+                ActiveEffects::default(),
+                Equipment {
+                    weapon: None,
+                    armor: Some(Item {
+                        template_key: "plate".to_string(),
+                        sockets: vec![],
+                    }),
+                    helmet: None,
+                },
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        // 10.0 damage * (1.0 - 0.5 resistance) = 5.0.
+        assert_eq!(world.get::<Health>(target).unwrap().current, 95.0);
+    }
+
+    #[test]
     fn attack_system_grants_xp_to_attacker_on_killing_blow() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Player,
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -631,11 +837,13 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Player,
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -687,10 +895,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -728,10 +938,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -769,10 +981,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -803,6 +1017,97 @@ mod tests {
         let _ = world.run_system_once(attack_system);
 
         assert_eq!(world.get::<Health>(target).unwrap().current, 30.0);
+    }
+
+    #[test]
+    fn attack_system_whiffs_an_in_range_target_outside_the_facing_cone() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                // Facing straight up; the target below is well outside the
+                // frontal cone despite being in range.
+                Facing { x: 0.0, y: 1.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 0.0, y: -1.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Health>(target).unwrap().current, 30.0);
+        // No eligible target in the cone means the attack never resolves,
+        // so the cooldown never starts either.
+        assert_eq!(world.get::<AttackTimer>(attacker).unwrap().0, 0.0);
+    }
+
+    #[test]
+    fn attack_system_hits_an_in_range_target_inside_the_facing_cone() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                Facing { x: 0.0, y: 1.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 0.0, y: 1.0 },
+                Health::new(30.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<Health>(target).unwrap().current, 20.0);
     }
 
     #[test]
@@ -846,10 +1151,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -888,10 +1195,12 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -925,11 +1234,13 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Player,
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -969,11 +1280,13 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
 
         let attacker = world
             .spawn((
                 Player,
                 Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
                 MeleeAttack {
                     range: 5.0,
                     damage: 10.0,
@@ -1012,5 +1325,60 @@ mod tests {
         let _ = world.run_system_once(attack_system);
 
         assert_eq!(world.get::<Health>(enemy).unwrap().current, 20.0);
+    }
+    #[test]
+    fn is_within_attack_arc_accepts_a_target_dead_ahead() {
+        let attacker_pos = Position { x: 0.0, y: 0.0 };
+        let facing = Facing { x: 1.0, y: 0.0 };
+        let target_pos = Position { x: 5.0, y: 0.0 };
+
+        assert!(is_within_attack_arc(
+            &attacker_pos,
+            &facing,
+            &target_pos,
+            MELEE_ARC_HALF_ANGLE_RADIANS
+        ));
+    }
+
+    #[test]
+    fn is_within_attack_arc_rejects_a_target_directly_behind() {
+        let attacker_pos = Position { x: 0.0, y: 0.0 };
+        let facing = Facing { x: 1.0, y: 0.0 };
+        let target_pos = Position { x: -5.0, y: 0.0 };
+
+        assert!(!is_within_attack_arc(
+            &attacker_pos,
+            &facing,
+            &target_pos,
+            MELEE_ARC_HALF_ANGLE_RADIANS
+        ));
+    }
+
+    #[test]
+    fn is_within_attack_arc_rejects_a_target_outside_a_narrow_cone() {
+        let attacker_pos = Position { x: 0.0, y: 0.0 };
+        let facing = Facing { x: 1.0, y: 0.0 };
+        // 90 degrees off-axis, well outside a 10-degree half-angle cone.
+        let target_pos = Position { x: 0.0, y: 5.0 };
+
+        assert!(!is_within_attack_arc(
+            &attacker_pos,
+            &facing,
+            &target_pos,
+            10.0_f32.to_radians()
+        ));
+    }
+
+    #[test]
+    fn is_within_attack_arc_accepts_a_target_at_the_same_position() {
+        let attacker_pos = Position { x: 3.0, y: 3.0 };
+        let facing = Facing { x: 1.0, y: 0.0 };
+
+        assert!(is_within_attack_arc(
+            &attacker_pos,
+            &facing,
+            &attacker_pos,
+            MELEE_ARC_HALF_ANGLE_RADIANS
+        ));
     }
 }

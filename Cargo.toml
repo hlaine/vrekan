@@ -51,3 +51,12 @@ bevy_lit = "=0.11.0"
 # default-features = false + the "2d" feature: this project has no 3D
 # rendering at all, and bevy_hanabi's default features are 3D-oriented.
 bevy_hanabi = { version = "=0.19.0", default-features = false, features = ["2d"] }
+# game_core only: lightweight logging facade for toggleable debug/trace
+# instrumentation (see DECISIONS.md) — just the `tracing` macros, no
+# subscriber/backend, so this stays a thin, engine-agnostic dependency.
+# `server` (and later `client`) already links the full `tracing-subscriber`
+# transitively via `bevy::log::LogPlugin`, which is what actually renders
+# these events and applies `RUST_LOG` filtering; pinned to the exact version
+# already resolved transitively in Cargo.lock so no duplicate version gets
+# pulled in.
+tracing = "=0.1.44"

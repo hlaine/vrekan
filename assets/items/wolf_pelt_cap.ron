@@ -2,4 +2,8 @@
     slot: Helmet,
     socket_count: 1,
     sell_value: 12,
+    // Modest flat resistance — tuning data, not final numbers.
+    resistances: {
+        "primal": 0.03,
+    },
 )

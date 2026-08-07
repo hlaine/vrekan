@@ -25,21 +25,20 @@ use content::{
     load_all_rune_templates, load_all_skill_templates, load_all_vendor_templates, spawn_enemy,
 };
 use game_core::combat::{
-    attack_system, death_system, tick_attack_timers, AttackRequested, AttackTimer, CombatStats,
-    DamageType, Health, MeleeAttack,
+    attack_system, death_system, tick_attack_timers, AttackRequested, CombatStats, Health,
 };
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
     allocate_stat_point, apply_death_xp_penalty, buy_item, equip_item, interact_or_pickup_system,
     learn_skill, nearest_interactable_with_panel, reset_xp_on_full_wipe, revive_system, sell_item,
-    skill_cast_system, socket_rune, tick_od_regen, tick_skill_cooldowns, tick_status_effects,
-    unequip_item, unsocket_rune, ActiveEffects, Currency, DeltaSeconds, Downed, DroppedLoot,
-    EffectDefinition, EffectKind, EffectTarget, Enemy, Equipment, Facing,
+    skill_cast_system, socket_rune, start_player_windups, tick_od_regen, tick_player_attack_phases,
+    tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, ActiveEffects,
+    AttackPhase, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy, Equipment, Facing,
     InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory, Item, ItemDrop,
-    ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Reviving, RuneInventory,
-    RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, StackMode, Stat, Stats, Stunned,
-    UnspentSkillPoints, UnspentStatPoints, Velocity, VendorLibrary, FORGING_PANEL_ID,
+    ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Resistances, Reviving,
+    RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, Stat, Stats,
+    Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity, VendorLibrary, FORGING_PANEL_ID,
     VENDOR_PANEL_ID,
 };
 use protocol::{
@@ -51,22 +50,13 @@ use protocol::{
 const PLAYER_SPEED: f32 = 200.0;
 const PLAYER_COLLIDER_RADIUS: f32 = 16.0;
 const PLAYER_MAX_HEALTH: f32 = 100.0;
-const PLAYER_ATTACK_RANGE: f32 = 60.0;
-const PLAYER_ATTACK_DAMAGE: f32 = 15.0;
-const PLAYER_ATTACK_COOLDOWN: f32 = 0.4;
-// A normal weapon strike — not yet one of the "christian" holy/radiant
-// types introduced by later enemy tiers (see DESIGN.md's Damage & faction
-// system and Enemy tiering sections).
-const PLAYER_ATTACK_DAMAGE_TYPE: &str = "primal";
+// Attack range/damage/cooldown/damage-type/"fury" self-buff are no longer
+// fixed player constants as of M8.6 — a player's effective attack derives
+// fresh from their equipped weapon (or `game_core::unarmed_weapon_stats`
+// for an empty slot) every attack, via `game_core::effective_weapon_stats`;
+// see `weapon_attack::player_fury_effect` for where "fury" now lives.
 const PLAYER_CRIT_CHANCE: f32 = 0.1;
 const PLAYER_CRIT_MULTIPLIER: f32 = 1.5;
-// "Fury": a self-buff that procs on a landed hit, stacking independently
-// (see MECHANICS.md's Combat section) — consecutive hits build separate
-// stacking crit-chance bonuses, self-limited by attack cooldown × duration
-// rather than growing unbounded.
-const PLAYER_FURY_ID: &str = "fury";
-const PLAYER_FURY_CRIT_CHANCE_BONUS: f32 = 0.05;
-const PLAYER_FURY_DURATION_SECS: f32 = 3.0;
 const PLAYER_OD_MAX: f32 = 100.0;
 const PLAYER_OD_REGEN_RATE: f32 = 5.0;
 const MAX_CLIENTS: usize = 2;
@@ -196,10 +186,16 @@ fn main() {
                     tick_attack_timers,
                     tick_od_regen,
                     tick_skill_cooldowns,
+                    start_player_windups,
                     attack_system,
                     skill_cast_system,
                     tick_status_effects,
                     death_system,
+                    // Runs after `tick_status_effects`/`death_system` so a
+                    // windup started this same tick sees this tick's freshest
+                    // `Stunned`/`Downed` state for cancellation — see
+                    // `game_core::tick_attack_phase`'s doc comment.
+                    tick_player_attack_phases,
                     apply_death_xp_penalty,
                     reset_xp_on_full_wipe,
                     revive_system,
@@ -524,28 +520,12 @@ fn on_client_connected(
         Facing::default(),
         MoveSpeed(PLAYER_SPEED),
         Health::new(PLAYER_MAX_HEALTH),
-        MeleeAttack {
-            range: PLAYER_ATTACK_RANGE,
-            damage: PLAYER_ATTACK_DAMAGE,
-            cooldown: PLAYER_ATTACK_COOLDOWN,
-            damage_type: DamageType(PLAYER_ATTACK_DAMAGE_TYPE.to_string()),
-            effects: vec![EffectDefinition {
-                id: PLAYER_FURY_ID.to_string(),
-                kind: EffectKind::StatModifier {
-                    stat: Stat::CritChance,
-                },
-                duration: PLAYER_FURY_DURATION_SECS,
-                magnitude: PLAYER_FURY_CRIT_CHANCE_BONUS,
-                stack_mode: StackMode::Independent,
-                applies_to: EffectTarget::Attacker,
-                chance: 1.0,
-            }],
-        },
         CombatStats {
             crit_chance: PLAYER_CRIT_CHANCE,
             crit_multiplier: PLAYER_CRIT_MULTIPLIER,
         },
-        AttackTimer(0.0),
+        AttackPhase::default(),
+        Resistances::default(),
         ActiveEffects::default(),
         (
             Replicated,
@@ -877,7 +857,9 @@ fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
 
 /// A downed or stunned player is out of action and ignores move input — see
 /// `game_core::combat::attack_system`'s doc comment for the same rule
-/// applied to attacking.
+/// applied to attacking. `AttackPhase` is fetched (not filtered) since a
+/// player mid-`Windup` is still movable in principle — see
+/// `apply_move_input` for how that's rooted instead of excluded outright.
 type MovablePlayers<'w, 's> = Query<
     'w,
     's,
@@ -887,6 +869,7 @@ type MovablePlayers<'w, 's> = Query<
         &'static mut Facing,
         Option<&'static Equipment>,
         Option<&'static Stats>,
+        &'static AttackPhase,
     ),
     (With<Player>, Without<Downed>, Without<Stunned>),
 >;
@@ -896,6 +879,17 @@ type MovablePlayers<'w, 's> = Query<
 /// rather than mutating the base component — same "never bake a buff into
 /// the base stat" principle as `combat::attack_system`'s equipment/level
 /// crit bonuses.
+///
+/// **Rooted during windup, free to move during recovery** — a starting
+/// assumption per MECHANICS.md's Weapons & attack timing section, not yet
+/// confirmed live. A player mid-`AttackPhase::Windup` has their move input
+/// ignored (velocity forced to zero) rather than being excluded from the
+/// query outright, since `MoveInput` is sent every frame regardless of
+/// whether a movement key is held (see `protocol::MoveInput`) — so this
+/// still re-zeros velocity each frame the client keeps sending input, the
+/// same way `freeze_incapacitated_players` re-zeros a downed/stunned
+/// player's velocity every tick rather than only at the instant they went
+/// down.
 fn apply_move_input(
     mut inputs: MessageReader<FromClient<MoveInput>>,
     mut players: MovablePlayers,
@@ -905,10 +899,16 @@ fn apply_move_input(
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((speed, mut velocity, mut facing, equipment, stats)) = players.get_mut(entity)
+        let Ok((speed, mut velocity, mut facing, equipment, stats, phase)) =
+            players.get_mut(entity)
         else {
             continue;
         };
+        if matches!(phase, AttackPhase::Windup { .. }) {
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            continue;
+        }
         let equipment_bonus = equipment
             .map(|equipment| equipment.stat_bonus(Stat::MoveSpeed, &runes))
             .unwrap_or(0.0);

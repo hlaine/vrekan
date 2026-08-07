@@ -1,10 +1,26 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use game_core::{EquipSlot, ItemDefinition, RuneDefinition, Stat};
+use game_core::{
+    DamageType, EquipSlot, ItemDefinition, Resistances, RuneDefinition, Stat, WeaponStats,
+};
 use serde::Deserialize;
 
 use crate::ContentError;
+
+/// Data-driven shape for a weapon's attack stats — see MECHANICS.md's
+/// Weapons & attack timing section. `damage_type` is a plain `String` here
+/// (converted to `game_core::DamageType` in `ItemTemplate::into_definition`),
+/// mirroring `EnemyTemplate::melee_damage_type`'s content-vs-engine split.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct WeaponTemplate {
+    pub damage: f32,
+    pub damage_type: String,
+    pub range: f32,
+    pub attack_duration: f32,
+    pub recovery: f32,
+}
 
 /// Data-driven shape for an item template — `EquipSlot` is reused directly
 /// from `game_core` (not mirrored like `EffectKindTemplate` mirrors
@@ -12,21 +28,74 @@ use crate::ContentError;
 /// conversion, unlike e.g. `DamageType`. `sell_value` is required, not
 /// defaulted — same "a content author always makes a conscious choice"
 /// convention as `EnemyTemplate::xp_reward`/`RuneTemplate::socket_cost`.
+///
+/// `weapon` and `resistances` are each meaningful for only one side of
+/// `slot` (`weapon` for `Weapon` items, `resistances` for `Armor`/`Helmet`
+/// — see MECHANICS.md) — `load_item_template` rejects a template that gets
+/// this backwards (a `Weapon` with no `weapon` block, or *any* slot other
+/// than `Weapon` carrying one, likewise `resistances` on a `Weapon`) rather
+/// than silently ignoring the mismatched field, the same "a stat that
+/// exists but does nothing is a bug, not a quirk" convention MECHANICS.md's
+/// "Effective combat values are always computed fresh" section names
+/// explicitly.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ItemTemplate {
     pub slot: EquipSlot,
     pub socket_count: u32,
     pub sell_value: u32,
+    #[serde(default)]
+    pub weapon: Option<WeaponTemplate>,
+    #[serde(default)]
+    pub resistances: HashMap<String, f32>,
 }
 
 impl ItemTemplate {
     pub fn into_definition(self) -> ItemDefinition {
+        let weapon = self.weapon.map(|weapon| WeaponStats {
+            damage: weapon.damage,
+            damage_type: DamageType(weapon.damage_type),
+            range: weapon.range,
+            attack_duration: weapon.attack_duration,
+            recovery: weapon.recovery,
+        });
+        let resistances = Resistances(
+            self.resistances
+                .into_iter()
+                .map(|(damage_type, fraction)| (DamageType(damage_type), fraction))
+                .collect(),
+        );
         ItemDefinition {
             slot: self.slot,
             socket_count: self.socket_count,
             sell_value: self.sell_value,
+            weapon,
+            resistances,
         }
     }
+}
+
+/// Rejects a template that gets `weapon`/`resistances` backwards relative to
+/// `slot` — see `ItemTemplate`'s doc comment. Called from `load_item_template`
+/// (which has `path` for the error), not `into_definition` (which doesn't),
+/// so a malformed file fails at load time alongside RON syntax errors rather
+/// than silently producing bad `ItemDefinition` data.
+fn validate_item_template(template: &ItemTemplate) -> Result<(), String> {
+    let is_weapon = template.slot == EquipSlot::Weapon;
+    if is_weapon && template.weapon.is_none() {
+        return Err("slot: Weapon requires a `weapon` block".to_string());
+    }
+    if !is_weapon && template.weapon.is_some() {
+        return Err(format!(
+            "slot: {:?} must not carry a `weapon` block (only Weapon items can)",
+            template.slot
+        ));
+    }
+    if is_weapon && !template.resistances.is_empty() {
+        return Err(
+            "slot: Weapon must not carry `resistances` (only Armor/Helmet can)".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Data-driven shape for a rune template — `Stat` is likewise reused
@@ -60,10 +129,15 @@ pub fn load_item_template(path: &Path) -> Result<ItemTemplate, ContentError> {
         path: path.to_path_buf(),
         source,
     })?;
-    parse_item_template(&contents).map_err(|source| ContentError::Parse {
+    let template = parse_item_template(&contents).map_err(|source| ContentError::Parse {
         path: path.to_path_buf(),
         source: Box::new(source),
-    })
+    })?;
+    validate_item_template(&template).map_err(|message| ContentError::Validation {
+        path: path.to_path_buf(),
+        message,
+    })?;
+    Ok(template)
 }
 
 /// Loads every `.ron` file directly inside `dir` as an `ItemTemplate`,
@@ -164,6 +238,96 @@ mod tests {
         assert!(parse_item_template("(slot: Weapon,").is_err());
     }
 
+    fn write_template(dir: &Path, name: &str, ron_str: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, ron_str).unwrap();
+        path
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "vrekan_content_test_{}_{label}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn load_rejects_a_weapon_slot_item_with_no_weapon_block() {
+        let dir = temp_dir("weapon_missing_block");
+        let path = write_template(
+            &dir,
+            "sword.ron",
+            "(slot: Weapon, socket_count: 2, sell_value: 5)",
+        );
+
+        let error = load_item_template(&path).unwrap_err();
+        assert!(matches!(error, ContentError::Validation { .. }));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_a_non_weapon_item_that_carries_a_weapon_block() {
+        let dir = temp_dir("non_weapon_with_block");
+        let path = write_template(
+            &dir,
+            "armor.ron",
+            "(slot: Armor, socket_count: 1, sell_value: 5, weapon: Some((\
+             damage: 5.0, damage_type: \"primal\", range: 40.0, \
+             attack_duration: 0.2, recovery: 0.5)))",
+        );
+
+        let error = load_item_template(&path).unwrap_err();
+        assert!(matches!(error, ContentError::Validation { .. }));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_a_weapon_that_carries_resistances() {
+        let dir = temp_dir("weapon_with_resistances");
+        let path = write_template(
+            &dir,
+            "sword.ron",
+            "(slot: Weapon, socket_count: 2, sell_value: 5, weapon: Some((\
+             damage: 5.0, damage_type: \"primal\", range: 40.0, \
+             attack_duration: 0.2, recovery: 0.5)), \
+             resistances: {\"holy\": 0.1})",
+        );
+
+        let error = load_item_template(&path).unwrap_err();
+        assert!(matches!(error, ContentError::Validation { .. }));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_accepts_a_well_formed_weapon_and_a_well_formed_armor_with_resistances() {
+        let dir = temp_dir("well_formed");
+        let weapon_path = write_template(
+            &dir,
+            "sword.ron",
+            "(slot: Weapon, socket_count: 2, sell_value: 5, weapon: Some((\
+             damage: 8.0, damage_type: \"primal\", range: 60.0, \
+             attack_duration: 0.3, recovery: 0.5)))",
+        );
+        let armor_path = write_template(
+            &dir,
+            "plate.ron",
+            "(slot: Armor, socket_count: 1, sell_value: 15, \
+             resistances: {\"holy\": 0.2})",
+        );
+
+        let weapon = load_item_template(&weapon_path).unwrap();
+        let armor = load_item_template(&armor_path).unwrap();
+
+        assert!(weapon.weapon.is_some());
+        assert_eq!(armor.resistances.get("holy"), Some(&0.2));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn parses_a_well_formed_rune_template() {
         let template = parse_rune_template(
@@ -200,7 +364,9 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("a_sword.ron"),
-            "(slot: Weapon, socket_count: 2, sell_value: 5)",
+            "(slot: Weapon, socket_count: 2, sell_value: 5, weapon: Some((\
+             damage: 8.0, damage_type: \"primal\", range: 60.0, \
+             attack_duration: 0.3, recovery: 0.5)))",
         )
         .unwrap();
 

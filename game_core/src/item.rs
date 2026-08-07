@@ -4,8 +4,10 @@ use bevy_ecs::prelude::*;
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
+use crate::combat::{DamageType, Resistances};
 use crate::economy::Currency;
 use crate::status_effect::Stat;
+use crate::weapon_attack::WeaponStats;
 
 /// Which equipment slot an item template goes into — matches the two
 /// slots M8's HUD/menus mention rendering (armor/helmet) plus the weapon
@@ -42,6 +44,17 @@ pub struct ItemDefinition {
     pub slot: EquipSlot,
     pub socket_count: u32,
     pub sell_value: u32,
+    /// Weapon-slot attack stats — always `Some` for `slot ==
+    /// EquipSlot::Weapon` and always `None` otherwise, enforced at
+    /// content-load time (see `content::item::load_item_template`), not
+    /// re-checked here. See MECHANICS.md's Weapons & attack timing section.
+    pub weapon: Option<WeaponStats>,
+    /// Flat per-`DamageType` resistance this item grants while equipped —
+    /// Armor/Helmet only per MECHANICS.md (enforced empty for `Weapon`
+    /// items at content-load time, same as `weapon` above). Summed across
+    /// equipped slots via `Equipment::resistance_bonus`, the same
+    /// computed-fresh shape `stat_bonus` already uses for runes.
+    pub resistances: Resistances,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
@@ -112,6 +125,23 @@ impl Equipment {
             .filter_map(|rune_id| runes.0.get(rune_id))
             .filter(|rune| rune.stat == stat)
             .map(|rune| rune.magnitude)
+            .sum()
+    }
+
+    /// Sum of `damage_type` resistance granted by every equipped item's own
+    /// `ItemDefinition::resistances` — computed fresh at point of use,
+    /// mirroring `stat_bonus`'s shape exactly. Looked up through `items`
+    /// (unlike `stat_bonus`, which reads sockets directly off the `Item`)
+    /// since resistance lives on the item *template*, not the per-instance
+    /// `Item` — an unknown `template_key` contributes nothing, same
+    /// "missing reference is a no-op, not a panic" convention `roll_loot`
+    /// already uses for untrusted/possibly-stale data.
+    pub fn resistance_bonus(&self, damage_type: &DamageType, items: &ItemLibrary) -> f32 {
+        [&self.weapon, &self.armor, &self.helmet]
+            .into_iter()
+            .flatten()
+            .filter_map(|item| items.0.get(&item.template_key))
+            .map(|definition| definition.resistances.get(damage_type))
             .sum()
     }
 }
@@ -359,6 +389,8 @@ mod tests {
                 slot: EquipSlot::Weapon,
                 socket_count: 2,
                 sell_value: 5,
+                weapon: None,
+                resistances: Resistances::default(),
             },
         );
 
@@ -382,6 +414,8 @@ mod tests {
                 slot: EquipSlot::Weapon,
                 socket_count: 0,
                 sell_value: 5,
+                weapon: None,
+                resistances: Resistances::default(),
             },
         );
 
@@ -619,6 +653,54 @@ mod tests {
     }
 
     #[test]
+    fn equipment_resistance_bonus_sums_matching_damage_type_across_equipped_slots() {
+        let holy = DamageType("holy".to_string());
+        let mut items = ItemLibrary::default();
+        items.0.insert(
+            "plate".to_string(),
+            ItemDefinition {
+                slot: EquipSlot::Armor,
+                socket_count: 0,
+                sell_value: 5,
+                weapon: None,
+                resistances: Resistances(HashMap::from([(holy.clone(), 0.2)])),
+            },
+        );
+        items.0.insert(
+            "cap".to_string(),
+            ItemDefinition {
+                slot: EquipSlot::Helmet,
+                socket_count: 0,
+                sell_value: 5,
+                weapon: None,
+                resistances: Resistances(HashMap::from([(holy.clone(), 0.1)])),
+            },
+        );
+        let equipment = Equipment {
+            weapon: None,
+            armor: Some(item("plate", 0)),
+            helmet: Some(item("cap", 0)),
+        };
+
+        let bonus = equipment.resistance_bonus(&holy, &items);
+
+        assert!((bonus - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equipment_resistance_bonus_ignores_an_unknown_equipped_template() {
+        let holy = DamageType("holy".to_string());
+        let items = ItemLibrary::default();
+        let equipment = Equipment {
+            weapon: None,
+            armor: Some(item("mystery", 0)),
+            helmet: None,
+        };
+
+        assert_eq!(equipment.resistance_bonus(&holy, &items), 0.0);
+    }
+
+    #[test]
     fn pickup_loot_pushes_items_increments_rune_counts_and_adds_currency() {
         let mut inventory = Inventory::default();
         let mut runes = RuneInventory::default();
@@ -700,6 +782,8 @@ mod tests {
                 slot: EquipSlot::Weapon,
                 socket_count: 3,
                 sell_value: 5,
+                weapon: None,
+                resistances: Resistances::default(),
             },
         );
         let mut rng = rand::rng();

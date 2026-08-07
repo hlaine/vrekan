@@ -113,6 +113,7 @@ pub fn sell_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::Resistances;
     use crate::item::{EquipSlot, ItemDefinition, RuneDefinition};
     use crate::status_effect::Stat;
 
@@ -124,6 +125,8 @@ mod tests {
                 slot: EquipSlot::Weapon,
                 socket_count: 2,
                 sell_value: 5,
+                weapon: None,
+                resistances: Resistances::default(),
             },
         );
         items

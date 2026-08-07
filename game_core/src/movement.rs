@@ -78,6 +78,18 @@ impl Facing {
         self.x = x / len;
         self.y = y / len;
     }
+
+    /// Points directly at `target` from `from`, ignoring movement — an
+    /// attack-time override for an entity that's committed to a locked
+    /// target (see MECHANICS.md's directional melee arcs), distinct from
+    /// `update_from_direction`'s normal movement-derived facing. A no-op if
+    /// `from` and `target` coincide (nothing sensible to face), same as
+    /// `update_from_direction`'s zero-vector case. Not yet called from any
+    /// system — wired in once M8.6's cone-gating lands for the caller that
+    /// needs it (see `game_core::combat`'s `AttackPhase`).
+    pub fn snap_toward(&mut self, from: &Position, target: &Position) {
+        self.update_from_direction(target.x - from.x, target.y - from.y);
+    }
 }
 
 pub fn movement_system(delta: Res<DeltaSeconds>, mut query: Query<(&mut Position, &Velocity)>) {
@@ -149,6 +161,28 @@ mod tests {
     fn facing_holds_previous_value_on_zero_direction() {
         let mut facing = Facing { x: 1.0, y: 0.0 };
         facing.update_from_direction(0.0, 0.0);
+        assert_eq!(facing, Facing { x: 1.0, y: 0.0 });
+    }
+
+    #[test]
+    fn snap_toward_points_at_the_target_normalized() {
+        let mut facing = Facing::default();
+        let from = Position { x: 0.0, y: 0.0 };
+        let target = Position { x: 3.0, y: 4.0 };
+
+        facing.snap_toward(&from, &target);
+
+        assert!((facing.x - 0.6).abs() < 1e-5);
+        assert!((facing.y - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn snap_toward_holds_previous_value_when_target_coincides_with_from() {
+        let mut facing = Facing { x: 1.0, y: 0.0 };
+        let point = Position { x: 5.0, y: 5.0 };
+
+        facing.snap_toward(&point, &point);
+
         assert_eq!(facing, Facing { x: 1.0, y: 0.0 });
     }
 

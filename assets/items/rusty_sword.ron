@@ -2,4 +2,13 @@
     slot: Weapon,
     socket_count: 2,
     sell_value: 20,
+    // Fast/light archetype: quick windup and recovery, modest damage.
+    // Tuning data, not final numbers.
+    weapon: Some((
+        damage: 8.0,
+        damage_type: "primal",
+        range: 55.0,
+        attack_duration: 0.25,
+        recovery: 0.4,
+    )),
 )

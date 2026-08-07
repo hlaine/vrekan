@@ -2,4 +2,13 @@
     slot: Weapon,
     socket_count: 3,
     sell_value: 40,
+    // Slow/heavy archetype: longer windup and recovery, longer range,
+    // higher damage than rusty_sword. Tuning data, not final numbers.
+    weapon: Some((
+        damage: 16.0,
+        damage_type: "primal",
+        range: 65.0,
+        attack_duration: 0.4,
+        recovery: 0.65,
+    )),
 )

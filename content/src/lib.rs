@@ -40,6 +40,12 @@ pub enum ContentError {
         path: PathBuf,
         source: Box<ron::error::SpannedError>,
     },
+    /// The file parsed as valid RON but violates a cross-field schema rule
+    /// (e.g. a `Weapon`-slot item with no `weapon` stats) — distinct from
+    /// `Parse`, which is a RON *syntax* error. Same "malformed content fails
+    /// loudly" convention, just a semantic check `ron::from_str` itself
+    /// can't express.
+    Validation { path: PathBuf, message: String },
 }
 
 impl fmt::Display for ContentError {
@@ -59,6 +65,9 @@ impl fmt::Display for ContentError {
                     path.display()
                 )
             }
+            ContentError::Validation { path, message } => {
+                write!(f, "invalid content file {}: {message}", path.display())
+            }
         }
     }
 }
@@ -68,6 +77,7 @@ impl std::error::Error for ContentError {
         match self {
             ContentError::Io { source, .. } => Some(source),
             ContentError::Parse { source, .. } => Some(source),
+            ContentError::Validation { .. } => None,
         }
     }
 }
