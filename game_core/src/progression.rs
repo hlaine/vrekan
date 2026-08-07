@@ -2,6 +2,7 @@ use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::player::{Downed, Player};
+use crate::rune::{rune_casts_granted, UnspentRuneCasts};
 use crate::skill::UnspentSkillPoints;
 
 /// Character level and progress toward the next one. See MECHANICS.md's
@@ -68,9 +69,12 @@ pub struct Attributes {
 /// `Attribute` maps to either — a field here that `derive_stats` never
 /// wrote would be exactly the "stat exists but does nothing" bug class
 /// this project has already been bitten by twice (see DECISIONS.md's M8.6
-/// entry). `intelligence` has no field here either, for the same
-/// leave-it-out-until-wired reason — it's stored/spendable on `Attributes`
-/// but drives nothing until M8.10-12's rune system.
+/// entry).
+///
+/// `bonus_rune_magnitude` (M8.10) is Intelligence's mechanical hook: not a
+/// combat stat by itself, but a multiplier read at the same point
+/// `item::Equipment::stat_bonus` sums socketed-rune contributions — see
+/// MECHANICS.md's "Rune magnitude scales with Intelligence" note.
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stats {
     pub bonus_max_health: f32,
@@ -78,6 +82,7 @@ pub struct Stats {
     pub bonus_damage_percent: f32,
     pub bonus_crit_chance: f32,
     pub bonus_attack_speed: f32,
+    pub bonus_rune_magnitude: f32,
 }
 
 /// Bonus granted per attribute point invested — tuning data, not settled
@@ -91,10 +96,10 @@ const VITALITY_RESISTANCE_PER_POINT: f32 = 0.005;
 const MIGHT_DAMAGE_PERCENT_PER_POINT: f32 = 0.02;
 const DEXTERITY_CRIT_CHANCE_PER_POINT: f32 = 0.005;
 const DEXTERITY_ATTACK_SPEED_PER_POINT: f32 = 0.02;
+const INTELLIGENCE_RUNE_MAGNITUDE_PER_POINT: f32 = 0.02;
 
 /// Pure derivation of `Stats` from `Attributes` — see MECHANICS.md's
 /// Attributes section for which attribute feeds which secondary stat.
-/// `Attribute::Intelligence` has no term here; see `Stats`'s doc comment.
 pub fn derive_stats(attributes: &Attributes) -> Stats {
     Stats {
         bonus_max_health: attributes.vitality as f32 * VITALITY_MAX_HEALTH_PER_POINT,
@@ -102,6 +107,8 @@ pub fn derive_stats(attributes: &Attributes) -> Stats {
         bonus_damage_percent: attributes.might as f32 * MIGHT_DAMAGE_PERCENT_PER_POINT,
         bonus_crit_chance: attributes.dexterity as f32 * DEXTERITY_CRIT_CHANCE_PER_POINT,
         bonus_attack_speed: attributes.dexterity as f32 * DEXTERITY_ATTACK_SPEED_PER_POINT,
+        bonus_rune_magnitude: attributes.intelligence as f32
+            * INTELLIGENCE_RUNE_MAGNITUDE_PER_POINT,
     }
 }
 
@@ -130,13 +137,20 @@ const SKILL_POINTS_PER_LEVEL: u32 = 1;
 
 /// Grants `amount` XP, leveling up as many times as the total covers — a
 /// single large grant can cross several level thresholds at once, not just
-/// the next one. Awards both stat and skill points per level, same
-/// "accumulate now, spend later" shape (see `UnspentStatPoints`/
-/// `UnspentSkillPoints`'s doc comments — both wait on M8 UI to spend).
+/// the next one. Awards stat and skill points per level unconditionally,
+/// same "accumulate now, spend later" shape (see `UnspentStatPoints`/
+/// `UnspentSkillPoints`'s doc comments — both wait on M8 UI to spend);
+/// `rune_casts` is granted per level too, but its *amount* is gated by
+/// `intelligence` (the caller's current `Attributes::intelligence`, read
+/// once up front — a level-up never changes it mid-grant) via
+/// `rune::rune_casts_granted`, MECHANICS.md's one Intelligence-scaled
+/// level-up reward.
 pub fn grant_xp(
     level: &mut Level,
     stat_points: &mut UnspentStatPoints,
     skill_points: &mut UnspentSkillPoints,
+    rune_casts: &mut UnspentRuneCasts,
+    intelligence: u32,
     amount: f32,
 ) {
     level.xp += amount;
@@ -145,6 +159,7 @@ pub fn grant_xp(
         level.level += 1;
         stat_points.0 += STAT_POINTS_PER_LEVEL;
         skill_points.0 += SKILL_POINTS_PER_LEVEL;
+        rune_casts.0 += rune_casts_granted(intelligence);
     }
 }
 
@@ -231,13 +246,22 @@ mod tests {
         let mut level = Level::default();
         let mut stat_points = UnspentStatPoints::default();
         let mut skill_points = UnspentSkillPoints::default();
+        let mut rune_casts = UnspentRuneCasts::default();
 
-        grant_xp(&mut level, &mut stat_points, &mut skill_points, 10.0);
+        grant_xp(
+            &mut level,
+            &mut stat_points,
+            &mut skill_points,
+            &mut rune_casts,
+            0,
+            10.0,
+        );
 
         assert_eq!(level.level, 1);
         assert_eq!(level.xp, 10.0);
         assert_eq!(stat_points.0, 0);
         assert_eq!(skill_points.0, 0);
+        assert_eq!(rune_casts.0, 0);
     }
 
     #[test]
@@ -245,12 +269,15 @@ mod tests {
         let mut level = Level::default();
         let mut stat_points = UnspentStatPoints::default();
         let mut skill_points = UnspentSkillPoints::default();
+        let mut rune_casts = UnspentRuneCasts::default();
         let required = xp_required(1);
 
         grant_xp(
             &mut level,
             &mut stat_points,
             &mut skill_points,
+            &mut rune_casts,
+            0,
             required + 25.0,
         );
 
@@ -258,6 +285,7 @@ mod tests {
         assert!((level.xp - 25.0).abs() < 1e-4);
         assert_eq!(stat_points.0, STAT_POINTS_PER_LEVEL);
         assert_eq!(skill_points.0, SKILL_POINTS_PER_LEVEL);
+        assert_eq!(rune_casts.0, rune_casts_granted(0));
     }
 
     #[test]
@@ -265,13 +293,22 @@ mod tests {
         let mut level = Level::default();
         let mut stat_points = UnspentStatPoints::default();
         let mut skill_points = UnspentSkillPoints::default();
+        let mut rune_casts = UnspentRuneCasts::default();
         let huge_amount = xp_required(1) + xp_required(2) + xp_required(3) + 5.0;
 
-        grant_xp(&mut level, &mut stat_points, &mut skill_points, huge_amount);
+        grant_xp(
+            &mut level,
+            &mut stat_points,
+            &mut skill_points,
+            &mut rune_casts,
+            10,
+            huge_amount,
+        );
 
         assert_eq!(level.level, 4);
         assert!((level.xp - 5.0).abs() < 1e-4);
         assert_eq!(stat_points.0, STAT_POINTS_PER_LEVEL * 3);
+        assert_eq!(rune_casts.0, rune_casts_granted(10) * 3);
         assert_eq!(skill_points.0, SKILL_POINTS_PER_LEVEL * 3);
     }
 
@@ -340,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_stats_leaves_intelligence_unwired() {
+    fn derive_stats_wires_intelligence_to_rune_magnitude_only() {
         let attributes = Attributes {
             might: 0,
             dexterity: 0,
@@ -348,7 +385,18 @@ mod tests {
             intelligence: 5,
         };
 
-        assert_eq!(derive_stats(&attributes), Stats::default());
+        let stats = derive_stats(&attributes);
+
+        assert!(
+            (stats.bonus_rune_magnitude - 5.0 * INTELLIGENCE_RUNE_MAGNITUDE_PER_POINT).abs() < 1e-6
+        );
+        assert_eq!(
+            stats,
+            Stats {
+                bonus_rune_magnitude: stats.bonus_rune_magnitude,
+                ..Stats::default()
+            }
+        );
     }
 
     #[test]

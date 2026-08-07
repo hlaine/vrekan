@@ -33,21 +33,23 @@ use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
 use game_core::{
     allocate_stat_point, apply_death_xp_penalty, buy_item, equip_item, interact_or_pickup_system,
-    learn_skill, nearest_interactable_with_panel, reset_xp_on_full_wipe, revive_system, sell_item,
-    skill_cast_system, socket_rune, start_player_windups, tick_od_regen, tick_player_attack_phases,
-    tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, update_unlockables,
-    ActiveEffects, AttackPhase, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
+    learn_skill, nearest_interactable_with_panel, request_rune_cast, reset_xp_on_full_wipe,
+    revive_system, select_rune_cast, sell_item, skill_cast_system, socket_rune,
+    start_player_windups, tick_od_regen, tick_player_attack_phases, tick_skill_cooldowns,
+    tick_status_effects, unequip_item, unsocket_rune, update_unlockables, ActiveEffects,
+    AttackPhase, Attributes, Currency, DeltaSeconds, DiscoveredRunes, Downed, DroppedLoot, Enemy,
     Equipment, Facing, Gate, GateOpen, InteractOrPickupRequested, Interactable,
-    InteractableLibrary, Inventory, Item, ItemDrop, ItemLibrary, KnownSkills, Level, MoveSpeed, Od,
-    Player, Position, PushableObject, Resistances, Reviving, RuneInventory, RuneLibrary,
-    SkillCastRequested, SkillCooldowns, SkillLibrary, Stat, Stats, Stunned, UnlockCondition,
-    Unlockable, UnspentSkillPoints, UnspentStatPoints, Velocity, VendorLibrary, Zone,
-    FORGING_PANEL_ID, VENDOR_PANEL_ID,
+    InteractableLibrary, Inventory, Item, ItemDrop, ItemLibrary, KnownRunes, KnownSkills, Level,
+    MoveSpeed, Od, Player, Position, PushableObject, Resistances, Reviving, RuneCastOffer,
+    RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, Stat, Stats,
+    Stunned, UnlockCondition, Unlockable, UnspentRuneCasts, UnspentSkillPoints, UnspentStatPoints,
+    Velocity, VendorLibrary, Zone, FORGING_PANEL_ID, RUNE_CASTING_PANEL_ID, VENDOR_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
-    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SellItemInput,
-    SocketRuneInput, UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
+    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, RequestRuneCastInput, ReviveInput,
+    SelectRuneCastInput, SellItemInput, SocketRuneInput, UnequipItemInput, UnsocketRuneInput,
+    PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_SPEED: f32 = 200.0;
@@ -227,6 +229,8 @@ fn main() {
                     apply_unequip_input,
                     apply_socket_rune_input,
                     apply_unsocket_rune_input,
+                    apply_request_rune_cast_input,
+                    apply_select_rune_cast_input,
                     apply_buy_item_input,
                     apply_sell_item_input,
                     apply_allocate_stat_point_input,
@@ -463,6 +467,9 @@ fn on_client_connected(
         equipment,
         runes,
         currency,
+        discovered_runes,
+        known_runes,
+        rune_casts,
     ) = match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
         Ok(Some(save)) => {
             if save.password != auth.character_password {
@@ -481,6 +488,9 @@ fn on_client_connected(
                 save.equipment,
                 save.runes,
                 save.currency,
+                save.discovered_runes,
+                save.known_runes,
+                save.rune_casts,
             )
         }
         Ok(None) => {
@@ -496,6 +506,9 @@ fn on_client_connected(
                 equipment: Equipment::default(),
                 runes: RuneInventory::default(),
                 currency: Currency::default(),
+                discovered_runes: DiscoveredRunes::default(),
+                known_runes: KnownRunes::default(),
+                rune_casts: UnspentRuneCasts::default(),
             };
             if let Err(error) =
                 persistence::save_character_save(saves_dir, &game_id.0, auth.character_id, &save)
@@ -517,6 +530,9 @@ fn on_client_connected(
                 save.equipment,
                 save.runes,
                 save.currency,
+                save.discovered_runes,
+                save.known_runes,
+                save.rune_casts,
             )
         }
         Err(error) => {
@@ -550,6 +566,10 @@ fn on_client_connected(
             equipment,
             runes,
             currency,
+            discovered_runes,
+            known_runes,
+            rune_casts,
+            RuneCastOffer::default(),
         ),
         Position { x: 0.0, y: 0.0 },
         Facing::default(),
@@ -591,6 +611,9 @@ type PersistedCharacterData<'w, 's> = Query<
         &'static Equipment,
         &'static RuneInventory,
         &'static Currency,
+        &'static DiscoveredRunes,
+        &'static KnownRunes,
+        &'static UnspentRuneCasts,
     ),
 >;
 
@@ -626,6 +649,9 @@ fn on_character_disconnected(
         equipment,
         runes,
         currency,
+        discovered_runes,
+        known_runes,
+        rune_casts,
     )) = characters.get(remove.entity)
     else {
         return;
@@ -663,6 +689,9 @@ fn on_character_disconnected(
         equipment: equipment.clone(),
         runes: runes.clone(),
         currency: *currency,
+        discovered_runes: discovered_runes.clone(),
+        known_runes: known_runes.clone(),
+        rune_casts: *rune_casts,
     };
     if let Err(error) =
         persistence::save_character_save(saves_dir, &game_id.0, character_id.0, &save)
@@ -1139,6 +1168,7 @@ type MovablePlayers<'w, 's> = Query<
         &'static mut Facing,
         Option<&'static Equipment>,
         &'static AttackPhase,
+        Option<&'static Stats>,
     ),
     (With<Player>, Without<Downed>, Without<Stunned>),
 >;
@@ -1170,7 +1200,8 @@ fn apply_move_input(
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((speed, mut velocity, mut facing, equipment, phase)) = players.get_mut(entity)
+        let Ok((speed, mut velocity, mut facing, equipment, phase, level_stats)) =
+            players.get_mut(entity)
         else {
             continue;
         };
@@ -1179,8 +1210,11 @@ fn apply_move_input(
             velocity.y = 0.0;
             continue;
         }
+        let intelligence_bonus = level_stats
+            .map(|stats| stats.bonus_rune_magnitude)
+            .unwrap_or(0.0);
         let equipment_bonus = equipment
-            .map(|equipment| equipment.stat_bonus(Stat::MoveSpeed, &runes))
+            .map(|equipment| equipment.stat_bonus(Stat::MoveSpeed, &runes, intelligence_bonus))
             .unwrap_or(0.0);
         let effective_speed = speed.0 + equipment_bonus;
         velocity.x = input.x * effective_speed;
@@ -1314,7 +1348,13 @@ fn apply_unequip_input(
 /// this while its forging panel is open.
 fn apply_socket_rune_input(
     mut inputs: MessageReader<FromClient<SocketRuneInput>>,
-    mut players: Query<(&Position, &mut Equipment, &mut RuneInventory, &mut Currency)>,
+    mut players: Query<(
+        &Position,
+        &mut Equipment,
+        &mut RuneInventory,
+        &mut Currency,
+        &KnownRunes,
+    )>,
     interactables: Query<(&Position, &Interactable)>,
     interactable_library: Res<InteractableLibrary>,
     runes: Res<RuneLibrary>,
@@ -1323,7 +1363,7 @@ fn apply_socket_rune_input(
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((actor_pos, mut equipment, mut rune_inventory, mut currency)) =
+        let Ok((actor_pos, mut equipment, mut rune_inventory, mut currency, known)) =
             players.get_mut(entity)
         else {
             continue;
@@ -1343,6 +1383,7 @@ fn apply_socket_rune_input(
             &mut rune_inventory,
             &runes,
             &mut currency,
+            known,
             input.slot,
             input.socket_index,
             &input.rune_id,
@@ -1382,6 +1423,67 @@ fn apply_unsocket_rune_input(
             input.slot,
             input.socket_index,
         );
+    }
+}
+
+/// Turns a client's `RequestRuneCastInput` into `game_core::request_rune_cast`'s
+/// resolution — a no-op (no state changed) with no unspent casts, or nothing
+/// left to offer (see that function's doc comment). Gated behind proximity
+/// to a `RUNE_CASTING_PANEL_ID`-capable `Interactable`, same pattern as
+/// `apply_socket_rune_input`'s forging check.
+fn apply_request_rune_cast_input(
+    mut inputs: MessageReader<FromClient<RequestRuneCastInput>>,
+    mut players: Query<(
+        &Position,
+        &mut RuneCastOffer,
+        &mut UnspentRuneCasts,
+        &DiscoveredRunes,
+        &KnownRunes,
+    )>,
+    interactables: Query<(&Position, &Interactable)>,
+    interactable_library: Res<InteractableLibrary>,
+) {
+    let mut rng = rand::rng();
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((actor_pos, mut offer, mut unspent, discovered, known)) = players.get_mut(entity)
+        else {
+            continue;
+        };
+        if nearest_interactable_with_panel(
+            actor_pos,
+            RUNE_CASTING_PANEL_ID,
+            interactables.iter(),
+            &interactable_library,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        request_rune_cast(&mut offer, &mut unspent, discovered, known, &mut rng);
+    }
+}
+
+/// Turns a client's `SelectRuneCastInput` into `game_core::select_rune_cast`'s
+/// resolution — a no-op if `rune_id` isn't among the caster's current
+/// `RuneCastOffer` candidates (see that function's doc comment). Not
+/// separately proximity-gated: the offer itself only ever exists because
+/// `apply_request_rune_cast_input` already required proximity to produce
+/// it, and walking away mid-choice shouldn't strand a pending pick.
+fn apply_select_rune_cast_input(
+    mut inputs: MessageReader<FromClient<SelectRuneCastInput>>,
+    mut players: Query<(&mut RuneCastOffer, &mut KnownRunes)>,
+) {
+    for input in inputs.read() {
+        let Some(entity) = input.client_id.entity() else {
+            continue;
+        };
+        let Ok((mut offer, mut known)) = players.get_mut(entity) else {
+            continue;
+        };
+        select_rune_cast(&mut offer, &mut known, &input.rune_id);
     }
 }
 

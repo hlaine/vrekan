@@ -1142,32 +1142,146 @@ weighted block, and the gate opening all working. **Not yet committed.**
 
 ## M8.10 — Rune discovery & learning
 
-- [ ] `DiscoveredRunes` (set, grows on first pickup of a rune type — new
-  in `merge_loot` alongside the existing `RuneInventory` stack increment)
-  and `KnownRunes` (set, mirrors `KnownSkills`) components, both replicated
-  and persisted like the rest of progression state.
-- [ ] `UnspentRuneCasts`, granted via `grant_xp` on level-up alongside the
-  existing stat/skill points — count gated by Intelligence per M8.7 (exact
-  curve is tuning data, see `MECHANICS.md`'s Open questions).
-- [ ] `socket_rune`/the M8.11/M8.12 combine functions gain a `KnownRunes`
-  membership check — the one new gate on otherwise-unchanged,
-  already-tested socket/unsocket code.
-- [ ] "Rune casting" panel at blacksmith/sejdr (reuses the existing
-  `is_near_interactable_with_panel` pattern): spend one
-  `UnspentRuneCasts`, server samples 3 from `DiscoveredRunes − KnownRunes`,
-  player picks one, added to `KnownRunes`. Fewer than 3 available → offer
-  whatever exists.
-- [ ] New `Interactable` payload: `grants_rune: Option<String>`, for
-  direct narrative grants (sejdr encounters, objectives) that bypass
-  casting — claimable once per player, same shape as other one-shot
-  interact effects.
-- [ ] `effective_magnitude = base_magnitude * (1 + intelligence_bonus)`
-  wired in at the same point `Equipment::stat_bonus` sums rune
-  contributions — the primary Intelligence hook, see `MECHANICS.md`.
-- [ ] Tests: cast sampling excludes already-known runes, gate rejects
-  socketing/combining an unknown rune even with stock on hand, direct
-  grant claims exactly once per player, magnitude scaling at zero and
-  high Intelligence.
+**Implementation status: everything below is built, unit-tested, and passes
+the full verification loop (build/test/clippy/fmt).** Built autonomously in
+a session continued from M8.9's commit/push (no new design round with the
+user beyond "start M8.10"); confirmed with the user before touching
+`protocol` (`PROTOCOL_ID` 4→5 — four new replicated components, two new
+client messages — see `DECISIONS.md`'s M8.10 entry) and before adding
+`rand` as a new direct dependency of `server` (already an exact-pinned
+workspace dependency used elsewhere, but a new dependency edge for this
+specific crate).
+
+**Confirmed live**, across an unusually long live-debugging session (see
+`DECISIONS.md` for the full trace) that also surfaced and resolved two
+real, unrelated dev-ops gaps along the way (a stale in-memory game
+password on server restart, and unsaved progress lost to a hard server
+kill — the latter now tracked as its own `M8.10 follow-up` below).
+Confirmed pieces, each via a live server+client session with
+`tracing::debug!` instrumentation on `interact_or_pickup_system` (kept
+permanently, see below): discovery-on-pickup and the resulting
+`RuneInventory`/`DiscoveredRunes` state; the `KnownRunes` socket gate
+(`crit_shard`, picked up but not yet known, was correctly rejected by
+Forging's Socket button; `swift_shard`, granted directly by the runestone,
+socketed successfully); the runestone's `grants_rune` direct-grant path;
+and the full rune-casting round trip (`RequestRuneCastInput` → offered
+`crit_shard` as the sole eligible candidate, correctly excluding the
+already-known `swift_shard` → `SelectRuneCastInput` → immediately
+socketable afterward).
+
+**One precondition was hand-set, not earned organically, and that's
+disclosed rather than hidden**: reaching `UnspentRuneCasts > 0` requires a
+level-up, and `spawn_enemies` places exactly one enemy per
+`assets/enemies/*.ron` file (two total, 25 XP combined, no respawn system)
+— structurally short of the 100 XP `xp_required(1)` needs, regardless of
+play skill. Rather than force several server restarts to grind it, the
+character's `rune_casts` field was hand-edited directly in its
+`saves/default/characters/<id>.ron` save file (while disconnected, per the
+same clean-disconnect discipline as any other save edit) to bootstrap a
+testable value. This is now documented as standard practice in
+`README.md`'s "Live playtest operations" section. The round trip itself
+(message plumbing, server resolution, replication, client panel) is fully
+confirmed live; reaching that precondition through organic XP gain is not,
+and isn't expected to be practical until more enemy content exists.
+
+The initial bug report this session ("no rune in starter loot," "runes not
+in inventory") turned out to be user-side confusion (checking the wrong
+panel; not realizing `crit_shard`/`swift_shard` *are* the rune ids), not a
+real defect — see `DECISIONS.md`.
+
+**A live-debugging decision worth recording**: `interact_or_pickup_system`
+gained permanent `tracing::debug!` instrumentation (pickup events + the
+direct-grant event) as a result of this detour, deliberately *not* removed
+afterward — mirrors `weapon_attack.rs`'s existing precedent of keeping
+this kind of debug-gated instrumentation permanently rather than treating
+every debugging session's logging as throwaway. See `DECISIONS.md`.
+
+- [x] `DiscoveredRunes` (set, grows on first pickup of a rune type — wired
+  into the existing `item::pickup_loot`, alongside the existing
+  `RuneInventory` stack increment) and `KnownRunes` (set, mirrors
+  `KnownSkills`) components, both replicated and persisted like the rest
+  of progression state. New `game_core::rune` module.
+- [x] `UnspentRuneCasts`, granted via `grant_xp` on level-up alongside the
+  existing stat/skill points — count gated by Intelligence via a new
+  `rune::rune_casts_granted(intelligence)` (base 1 + 1 per 5 points
+  invested; tuning data, not a settled curve, see `MECHANICS.md`'s Open
+  questions). `grant_xp` itself widened to take `&mut UnspentRuneCasts` +
+  the caster's current `intelligence: u32`, which meant threading
+  `Attributes`/`UnspentRuneCasts` through `combat::AttackerProgress`,
+  `weapon_attack::TickingPlayers`, and `skill::SkillCasters` — the same
+  "add one more optional field, thread it through every call site" cost
+  M8.7/M8.8 already established as routine here.
+- [x] `socket_rune` gains a `KnownRunes` membership check — the one new
+  gate on otherwise-unchanged, already-tested socket/unsocket code (the
+  M8.11/M8.12 combine functions don't exist yet, so there's nothing else
+  to gate this pass).
+- [x] "Rune casting" panel at the blacksmith (reuses the existing
+  `nearest_interactable_with_panel` pattern via a new
+  `RUNE_CASTING_PANEL_ID`, added to `blacksmith.ron`'s `opens_panels` — no
+  dedicated sejdr NPC yet, nothing else justifies one existing this pass).
+  **A new two-message round trip, not a single-button action like every
+  other panel so far** — confirmed with the user before implementing, not
+  guessed at: `RequestRuneCastInput` spends one `UnspentRuneCasts` and has
+  the server sample up to 3 candidates from `DiscoveredRunes − KnownRunes`
+  into a new replicated `RuneCastOffer` component (fewer than 3 available
+  → offers whatever exists; nothing available → rejected, no point
+  spent); `SelectRuneCastInput` confirms one offered candidate into
+  `KnownRunes`. The spend happens at request time, not selection time —
+  see `DECISIONS.md` for the reasoning and for why the selection step is
+  deliberately *not* re-gated by proximity the way the request is.
+- [x] New `Interactable` payload: `InteractableDefinition`/
+  `content::InteractableTemplate` gain `grants_rune: Option<String>`, for
+  direct narrative grants that bypass casting — applied unconditionally
+  alongside `effect` in `interact_or_pickup_system`. Naturally claimable
+  only once in effect (`KnownRunes`/`DiscoveredRunes` are sets — a repeat
+  interaction is a no-op insert), no separate "already claimed" state
+  needed. `runestone.ron` gained `grants_rune: Some("swift_shard")`
+  alongside its existing crit-chance buff as the real content proof.
+- [x] `effective_magnitude = base_magnitude * (1 + intelligence_bonus)`
+  wired in at the same point `item::Equipment::stat_bonus` sums rune
+  contributions — the primary Intelligence hook, see `MECHANICS.md`. Wired
+  generically at the shared `stat_bonus` function itself (a new
+  `intelligence_bonus: f32` parameter, sourced from a new `Stats::
+  bonus_rune_magnitude` field derived from `Attributes::intelligence`),
+  not duplicated per formula — every existing rune-sourced bonus (crit
+  chance/multiplier, attack speed, move speed) picks up the scaling for
+  free from this one change, matching MECHANICS.md's literal wording that
+  this applies wherever `stat_bonus` already sums rune contributions, not
+  just a new bespoke calculation.
+- [x] Tests: cast sampling excludes already-known runes and rejects when
+  either no casts are unspent or nothing is left to offer; the socket gate
+  rejects an unknown rune even with stock and currency on hand; direct
+  grants add to both `KnownRunes` and `DiscoveredRunes`, and an
+  interactable with no `grants_rune` leaves both untouched; `stat_bonus`'s
+  magnitude scaling at a representative intelligence bonus; `rune_casts_
+  granted`'s curve at zero and higher intelligence.
+
+## M8.10 follow-up — graceful server shutdown save
+
+**Found via this session's live-testing, not a new design ask — flagged
+high priority.** The server's persistence model has always been
+save-on-disconnect only (see M5's persistence entry): `on_character_
+disconnected`, an observer reacting to a client's connection actually
+closing, is the *only* place `persistence::save_character_save` is called
+after initial character creation — no periodic autosave, no
+graceful-shutdown hook. Restarting the server mid-session during this
+milestone's live-debugging loop (via `kill <pid>`, a hard `SIGTERM`)
+silently discarded every connected player's progress since their last
+*clean* disconnect every single time, since a killed process never gives
+that observer a chance to run before it dies. Not a bug in any shipped
+milestone's game logic — a pre-existing dev-ops gap this session's
+unusually long live-debugging loop happened to expose repeatedly (see
+`DECISIONS.md`).
+
+- [ ] Install a signal handler (SIGINT/SIGTERM — likely the `ctrlc` or
+  `signal-hook` crate; **new dependency, flag before adding** per
+  `CLAUDE.md`) that triggers a save for every currently-connected
+  character before the process actually exits, reusing the exact same
+  `persistence::save_character_save` path `on_character_disconnected`
+  already calls rather than duplicating that logic.
+- [ ] Confirm live: with a connected client holding unsaved progress
+  (picked-up loot, equipped gear, spent currency), kill/restart the
+  server, then reconnect and verify that progress survived.
 
 ## M8.11 — Repeated-rune combining
 

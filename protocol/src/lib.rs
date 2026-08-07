@@ -3,17 +3,18 @@ use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
-    AttackTimer, Attribute, Attributes, Currency, Destructible, DestructibleKind, Downed, Enemy,
-    EnemyKind, EquipSlot, Equipment, Facing, Gate, GateOpen, Health, Interactable, Inventory,
-    ItemDrop, KnownSkills, Level, Od, Position, PushableObject, RecentCrit, RuneInventory,
-    SkillCooldowns, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints,
+    AttackTimer, Attribute, Attributes, Currency, Destructible, DestructibleKind, DiscoveredRunes,
+    Downed, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Gate, GateOpen, Health, Interactable,
+    Inventory, ItemDrop, KnownRunes, KnownSkills, Level, Od, Position, PushableObject, RecentCrit,
+    RuneCastOffer, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentRuneCasts,
+    UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
 /// shapes) so incompatible client/server builds refuse to connect instead of
 /// silently desyncing.
-pub const PROTOCOL_ID: u64 = 4;
+pub const PROTOCOL_ID: u64 = 5;
 
 pub const SERVER_PORT: u16 = 5000;
 
@@ -146,6 +147,24 @@ pub struct SellItemInput {
     pub inventory_index: usize,
 }
 
+/// Sent by the M8.10 rune-casting panel's "Cast" button — spends one
+/// `UnspentRuneCasts` via `game_core::request_rune_cast`, sampling candidates
+/// into the caster's `RuneCastOffer`. No payload: like `AttackInput`, the
+/// server resolves everything (which rune types are eligible, the random
+/// sample) from its own authoritative state. Gated server-side by proximity
+/// to a `RUNE_CASTING_PANEL_ID`-capable `Interactable`, same pattern as
+/// `SocketRuneInput`'s forging-panel check.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestRuneCastInput;
+
+/// Sent by the rune-casting panel's candidate buttons — confirms `rune_id`
+/// (must be one of the caster's current `RuneCastOffer` candidates) via
+/// `game_core::select_rune_cast`, adding it to `KnownRunes`.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SelectRuneCastInput {
+    pub rune_id: String,
+}
+
 /// Fixed size of netcode's connection-time `user_data` field (see
 /// `renetcode::NETCODE_USER_DATA_BYTES`, verified as 256 in that crate's
 /// source). `protocol` doesn't depend on `renet` directly, so this is a
@@ -253,6 +272,10 @@ impl Plugin for NetworkPlugin {
             .replicate::<PushableObject>()
             .replicate::<Gate>()
             .replicate::<GateOpen>()
+            .replicate::<DiscoveredRunes>()
+            .replicate::<KnownRunes>()
+            .replicate::<UnspentRuneCasts>()
+            .replicate::<RuneCastOffer>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable)
@@ -265,7 +288,9 @@ impl Plugin for NetworkPlugin {
             .add_client_message::<AllocateStatPointInput>(Channel::Unreliable)
             .add_client_message::<LearnSkillInput>(Channel::Unreliable)
             .add_client_message::<BuyItemInput>(Channel::Unreliable)
-            .add_client_message::<SellItemInput>(Channel::Unreliable);
+            .add_client_message::<SellItemInput>(Channel::Unreliable)
+            .add_client_message::<RequestRuneCastInput>(Channel::Unreliable)
+            .add_client_message::<SelectRuneCastInput>(Channel::Unreliable);
     }
 }
 

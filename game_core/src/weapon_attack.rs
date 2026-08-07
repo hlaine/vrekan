@@ -7,7 +7,8 @@ use crate::combat::{
 use crate::item::{Equipment, ItemLibrary, RuneLibrary};
 use crate::movement::{Facing, Position};
 use crate::player::{Downed, Player};
-use crate::progression::{Level, Stats, UnspentStatPoints, XpReward};
+use crate::progression::{Attributes, Level, Stats, UnspentStatPoints, XpReward};
+use crate::rune::UnspentRuneCasts;
 use crate::skill::{Od, UnspentSkillPoints};
 use crate::status_effect::{
     ActiveEffects, EffectDefinition, EffectKind, EffectTarget, Stat, Stunned,
@@ -97,8 +98,11 @@ pub fn effective_attack_speed_bonus(
     attacker_level_stats: Option<&Stats>,
     runes: &RuneLibrary,
 ) -> f32 {
+    let intelligence_bonus = attacker_level_stats
+        .map(|stats| stats.bonus_rune_magnitude)
+        .unwrap_or(0.0);
     let equipment_bonus = attacker_equipment
-        .map(|equipment| equipment.stat_bonus(Stat::AttackSpeed, runes))
+        .map(|equipment| equipment.stat_bonus(Stat::AttackSpeed, runes, intelligence_bonus))
         .unwrap_or(0.0);
     let level_bonus = attacker_level_stats
         .map(|stats| stats.bonus_attack_speed)
@@ -312,9 +316,11 @@ type TickingPlayers<'w, 's> = Query<
         Option<&'static mut Level>,
         Option<&'static mut UnspentStatPoints>,
         Option<&'static mut UnspentSkillPoints>,
+        Option<&'static mut UnspentRuneCasts>,
         Option<&'static mut Od>,
         Option<&'static Equipment>,
         Option<&'static Stats>,
+        Option<&'static Attributes>,
     ),
     With<Player>,
 >;
@@ -358,9 +364,11 @@ pub fn tick_player_attack_phases(
         level,
         stat_points,
         skill_points,
+        rune_casts,
         od,
         equipment,
         level_stats,
+        attributes,
     ) in &mut players
     {
         let weapon = effective_weapon_stats(equipment, &items);
@@ -380,6 +388,8 @@ pub fn tick_player_attack_phases(
             level: level.map(|level| level.into_inner()),
             stat_points: stat_points.map(|points| points.into_inner()),
             skill_points: skill_points.map(|points| points.into_inner()),
+            rune_casts: rune_casts.map(|casts| casts.into_inner()),
+            intelligence: attributes.map(|a| a.intelligence).unwrap_or(0),
             od: od.map(|od| od.into_inner()),
         };
         let hit = resolve_melee_hit(

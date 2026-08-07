@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::item::{roll_loot, Equipment, ItemDrop, ItemLibrary, LootTable, RuneLibrary};
 use crate::movement::{Facing, Position};
 use crate::player::{Downed, Player};
-use crate::progression::{grant_xp, Level, Stats, UnspentStatPoints, XpReward};
+use crate::progression::{grant_xp, Attributes, Level, Stats, UnspentStatPoints, XpReward};
+use crate::rune::UnspentRuneCasts;
 use crate::skill::{Od, UnspentSkillPoints};
 use crate::status_effect::{ActiveEffects, EffectDefinition, EffectTarget, Stat, Stunned};
 use crate::DeltaSeconds;
@@ -230,12 +231,14 @@ pub fn is_within_attack_arc(
 }
 
 /// A downed or stunned entity can't attack — see `attack_system`. The
-/// `Level`/`UnspentStatPoints`/`UnspentSkillPoints` triple is `Option` since
-/// only players have them — used to grant XP on a killing blow, see
-/// `attack_system`. `Od` is likewise `Option` (only players have a resource
-/// pool) — a landed hit grants a bonus regardless of whether it kills.
-/// `Stats` (manually-allocated level-up points) is `Option` for the same
-/// reason as `Equipment` — only players have either.
+/// `Level`/`UnspentStatPoints`/`UnspentSkillPoints`/`UnspentRuneCasts`
+/// quartet is `Option` since only players have them — used to grant XP (and,
+/// on a level-up, rune casts gated by `Attributes::intelligence`) on a
+/// killing blow, see `attack_system`. `Od` is likewise `Option` (only
+/// players have a resource pool) — a landed hit grants a bonus regardless of
+/// whether it kills. `Stats`/`Attributes` (manually-allocated level-up
+/// points, and the raw investment `grant_xp` reads `intelligence` from) are
+/// `Option` for the same reason as `Equipment` — only players have either.
 type Attackers<'w, 's> = Query<
     'w,
     's,
@@ -249,22 +252,29 @@ type Attackers<'w, 's> = Query<
         Option<&'static mut Level>,
         Option<&'static mut UnspentStatPoints>,
         Option<&'static mut UnspentSkillPoints>,
+        Option<&'static mut UnspentRuneCasts>,
         Option<&'static mut Od>,
         Option<&'static Equipment>,
         Option<&'static Stats>,
+        Option<&'static Attributes>,
     ),
     (Without<Downed>, Without<Stunned>),
 >;
 
 /// Bundles an attacker's `Option`-typed progression/resource state for
-/// `resolve_melee_hit` — only players have any of these (XP/stat/skill
-/// points on a killing blow, `Od` gain on any landed hit); enemies pass
-/// every field as `None`. One struct instead of four loosely-related
-/// `Option<&mut T>` parameters.
+/// `resolve_melee_hit` — only players have any of these (XP/stat/skill/rune-
+/// cast points on a killing blow, `Od` gain on any landed hit); enemies pass
+/// every field as `None`. One struct instead of several loosely-related
+/// `Option<&mut T>` parameters. `intelligence` is a plain `u32` (not
+/// `Option<&Attributes>`) since it's only ever read, never mutated, by
+/// `grant_xp` — the caller resolves it from the attacker's own `Attributes`
+/// (0 if they have none) when building this struct.
 pub struct AttackerProgress<'a> {
     pub level: Option<&'a mut Level>,
     pub stat_points: Option<&'a mut UnspentStatPoints>,
     pub skill_points: Option<&'a mut UnspentSkillPoints>,
+    pub rune_casts: Option<&'a mut UnspentRuneCasts>,
+    pub intelligence: u32,
     pub od: Option<&'a mut Od>,
 }
 
@@ -330,11 +340,14 @@ pub fn resolve_melee_hit(
     else {
         return false;
     };
+    let intelligence_bonus = attacker_level_stats
+        .map(|stats| stats.bonus_rune_magnitude)
+        .unwrap_or(0.0);
     let equipment_crit_chance = attacker_equipment
-        .map(|equipment| equipment.stat_bonus(Stat::CritChance, runes))
+        .map(|equipment| equipment.stat_bonus(Stat::CritChance, runes, intelligence_bonus))
         .unwrap_or(0.0);
     let equipment_crit_multiplier = attacker_equipment
-        .map(|equipment| equipment.stat_bonus(Stat::CritMultiplier, runes))
+        .map(|equipment| equipment.stat_bonus(Stat::CritMultiplier, runes, intelligence_bonus))
         .unwrap_or(0.0);
     let level_crit_chance = attacker_level_stats
         .map(|stats| stats.bonus_crit_chance)
@@ -385,13 +398,27 @@ pub fn resolve_melee_hit(
     }
 
     if health.is_dead() {
-        if let (Some(xp_reward), Some(level), Some(stat_points), Some(skill_points)) = (
+        if let (
+            Some(xp_reward),
+            Some(level),
+            Some(stat_points),
+            Some(skill_points),
+            Some(rune_casts),
+        ) = (
             xp_reward,
             attacker_progress.level.as_deref_mut(),
             attacker_progress.stat_points.as_deref_mut(),
             attacker_progress.skill_points.as_deref_mut(),
+            attacker_progress.rune_casts.as_deref_mut(),
         ) {
-            grant_xp(level, stat_points, skill_points, xp_reward.0);
+            grant_xp(
+                level,
+                stat_points,
+                skill_points,
+                rune_casts,
+                attacker_progress.intelligence,
+                xp_reward.0,
+            );
         }
     }
 
@@ -479,9 +506,11 @@ pub fn attack_system(
             attacker_level,
             attacker_stat_points,
             attacker_skill_points,
+            attacker_rune_casts,
             attacker_od,
             attacker_equipment,
             attacker_level_stats,
+            attacker_attributes,
         )) = attackers.get_mut(event.attacker)
         else {
             continue;
@@ -518,6 +547,8 @@ pub fn attack_system(
             level: attacker_level.map(|level| level.into_inner()),
             stat_points: attacker_stat_points.map(|points| points.into_inner()),
             skill_points: attacker_skill_points.map(|points| points.into_inner()),
+            rune_casts: attacker_rune_casts.map(|casts| casts.into_inner()),
+            intelligence: attacker_attributes.map(|a| a.intelligence).unwrap_or(0),
             od: attacker_od.map(|od| od.into_inner()),
         };
         let hit = resolve_melee_hit(
@@ -1042,6 +1073,7 @@ mod tests {
                 Level::default(),
                 UnspentStatPoints::default(),
                 UnspentSkillPoints::default(),
+                UnspentRuneCasts::default(),
             ))
             .id();
         world.spawn((
@@ -1088,6 +1120,7 @@ mod tests {
                 Level::default(),
                 UnspentStatPoints::default(),
                 UnspentSkillPoints::default(),
+                UnspentRuneCasts::default(),
             ))
             .id();
         world.spawn((

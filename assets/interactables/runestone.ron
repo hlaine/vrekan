@@ -15,4 +15,8 @@
         applies_to: Attacker,
         chance: 1.0,
     )),
+    // M8.10: direct rune grant (game_core::InteractableDefinition::grants_rune)
+    // — bypasses the rune-casting panel entirely, proving that path with a
+    // real content example alongside the runestone's existing buff effect.
+    grants_rune: Some("swift_shard"),
 )

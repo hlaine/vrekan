@@ -5880,6 +5880,7 @@ dependencies = [
  "content",
  "game_core",
  "protocol",
+ "rand",
  "ron",
  "serde",
  "tiled",

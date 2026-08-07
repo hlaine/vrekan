@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::combat::{apply_damage, resolve_damage, CombatStats, DamageType, Health, Resistances};
 use crate::movement::Position;
 use crate::player::{Downed, Player};
-use crate::progression::{grant_xp, Level, UnspentStatPoints, XpReward};
+use crate::progression::{grant_xp, Attributes, Level, UnspentStatPoints, XpReward};
+use crate::rune::UnspentRuneCasts;
 use crate::status_effect::{ActiveEffects, EffectDefinition, Stunned};
 use crate::DeltaSeconds;
 
@@ -170,9 +171,10 @@ pub struct SkillCastRequested {
 }
 
 /// A downed or stunned caster can't cast, same as `combat::Attackers` for
-/// basic attacks. The `Level`/`UnspentStatPoints`/`UnspentSkillPoints`
-/// triple is `Option` since only players have them — used to grant XP on a
-/// killing blow, mirroring `combat::attack_system`.
+/// basic attacks. The `Level`/`UnspentStatPoints`/`UnspentSkillPoints`/
+/// `UnspentRuneCasts` quartet (plus `Attributes`, for `grant_xp`'s
+/// Intelligence-gated rune-cast count) is `Option` since only players have
+/// them — used to grant XP on a killing blow, mirroring `combat::attack_system`.
 type SkillCasters<'w, 's> = Query<
     'w,
     's,
@@ -186,6 +188,8 @@ type SkillCasters<'w, 's> = Query<
         Option<&'static mut Level>,
         Option<&'static mut UnspentStatPoints>,
         Option<&'static mut UnspentSkillPoints>,
+        Option<&'static mut UnspentRuneCasts>,
+        Option<&'static Attributes>,
     ),
     (Without<Downed>, Without<Stunned>),
 >;
@@ -224,10 +228,13 @@ pub fn skill_cast_system(
             mut caster_level,
             mut caster_stat_points,
             mut caster_skill_points,
+            mut caster_rune_casts,
+            caster_attributes,
         )) = casters.get_mut(event.caster)
         else {
             continue;
         };
+        let caster_intelligence = caster_attributes.map(|a| a.intelligence).unwrap_or(0);
 
         if !known.0.contains_key(&event.skill_id) {
             continue;
@@ -267,6 +274,8 @@ pub fn skill_cast_system(
                     caster_level.as_deref_mut(),
                     caster_stat_points.as_deref_mut(),
                     caster_skill_points.as_deref_mut(),
+                    caster_rune_casts.as_deref_mut(),
+                    caster_intelligence,
                 );
             }
             SkillKind::AoeBurst {
@@ -296,6 +305,8 @@ pub fn skill_cast_system(
                         caster_level.as_deref_mut(),
                         caster_stat_points.as_deref_mut(),
                         caster_skill_points.as_deref_mut(),
+                        caster_rune_casts.as_deref_mut(),
+                        caster_intelligence,
                     );
                 }
             }
@@ -370,6 +381,8 @@ fn resolve_hit(
     caster_level: Option<&mut Level>,
     caster_stat_points: Option<&mut UnspentStatPoints>,
     caster_skill_points: Option<&mut UnspentSkillPoints>,
+    caster_rune_casts: Option<&mut UnspentRuneCasts>,
+    caster_intelligence: u32,
 ) {
     let Ok((mut health, resistances, xp_reward)) = healths.get_mut(target) else {
         return;
@@ -396,13 +409,27 @@ fn resolve_hit(
     }
 
     if health.is_dead() {
-        if let (Some(xp_reward), Some(level), Some(stat_points), Some(skill_points)) = (
+        if let (
+            Some(xp_reward),
+            Some(level),
+            Some(stat_points),
+            Some(skill_points),
+            Some(rune_casts),
+        ) = (
             xp_reward,
             caster_level,
             caster_stat_points,
             caster_skill_points,
+            caster_rune_casts,
         ) {
-            grant_xp(level, stat_points, skill_points, xp_reward.0);
+            grant_xp(
+                level,
+                stat_points,
+                skill_points,
+                rune_casts,
+                caster_intelligence,
+                xp_reward.0,
+            );
         }
     }
 }

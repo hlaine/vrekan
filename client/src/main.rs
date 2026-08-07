@@ -38,19 +38,21 @@ use game_core::{
     Attribute as PrimaryAttribute, Attributes, Currency, DeltaSeconds, Destructible,
     DestructibleKind, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Gate,
     GateOpen, Health, Interactable, Inventory, Item, ItemDrop, KnownSkills, Level, Od,
-    PushableObject, RecentCrit, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints,
-    UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE, VENDOR_PANEL_ID,
+    PushableObject, RecentCrit, RuneCastOffer, RuneInventory, SkillCooldowns, Stats, Stunned,
+    UnspentRuneCasts, UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE,
+    RUNE_CASTING_PANEL_ID, VENDOR_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
-    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, ReviveInput, SellItemInput,
-    SocketRuneInput, UnequipItemInput, UnsocketRuneInput, PROTOCOL_ID, SERVER_PORT,
+    LearnSkillInput, MoveInput, NetworkPlugin, PickupItemInput, RequestRuneCastInput, ReviveInput,
+    SelectRuneCastInput, SellItemInput, SocketRuneInput, UnequipItemInput, UnsocketRuneInput,
+    PROTOCOL_ID, SERVER_PORT,
 };
 
 const PLAYER_COLOR: Color = Color::srgb(0.2, 0.7, 0.3);
 const REMOTE_PLAYER_COLOR: Color = Color::srgb(0.3, 0.5, 0.8);
 const ITEM_DROP_COLOR: Color = Color::srgb(0.9, 0.8, 0.2);
-const RUNE_DROP_COLOR: Color = Color::srgb(0.6, 0.2, 0.9);
+const RUNE_DROP_COLOR: Color = Color::WHITE;
 const CURRENCY_DROP_COLOR: Color = Color::srgb(0.95, 0.75, 0.1);
 const DROP_SPRITE_SIZE: f32 = 16.0;
 
@@ -385,16 +387,19 @@ type CombatFeedbackTargets = Or<(With<Player>, With<RemotePlayer>, With<Enemy>)>
 /// old either-or behavior for runestone-style NPCs. `vendor` carries
 /// *which* vendor's `template_key` to read its `VendorTemplate` listing
 /// from — not just a bool, since which vendor matters for that lookup.
+/// `rune_casting` (M8.10) is a plain bool like `forging_open` — no per-NPC
+/// data needed, same reasoning.
 #[derive(Resource, Default)]
 struct InteractionPanels {
     dialog: Option<String>,
     forging_open: bool,
     vendor: Option<String>,
+    rune_casting: bool,
 }
 
 impl InteractionPanels {
     fn any_open(&self) -> bool {
-        self.dialog.is_some() || self.forging_open || self.vendor.is_some()
+        self.dialog.is_some() || self.forging_open || self.vendor.is_some() || self.rune_casting
     }
 
     /// Closes everything at once rather than one at a time — pressing
@@ -405,6 +410,7 @@ impl InteractionPanels {
         self.dialog = None;
         self.forging_open = false;
         self.vendor = None;
+        self.rune_casting = false;
     }
 }
 
@@ -514,6 +520,7 @@ fn main() {
                 character_panel_system,
                 dialog_panel_system,
                 forging_panel_system,
+                rune_casting_panel_system,
                 vendor_panel_system,
             )
                 .chain(),
@@ -1768,8 +1775,10 @@ fn attribute_points(attributes: &Attributes, attribute: PrimaryAttribute) -> u32
 
 /// A short player-facing summary of what `attribute` currently grants, read
 /// from the already-derived `Stats` rather than recomputing it here.
-/// Intelligence has nothing to show yet — it's stored/spendable but has no
-/// wired effect until M8.10-12's rune system (see
+/// Intelligence's rune-magnitude bonus (M8.10) is the multiplier
+/// `item::Equipment::stat_bonus` applies to socketed-rune magnitude — it
+/// grants nothing by itself without a socketed rune to scale, but it's a
+/// real wired number now, not a placeholder (see
 /// `progression::derive_stats`'s doc comment).
 fn attribute_summary(stats: &Stats, attribute: PrimaryAttribute) -> String {
     match attribute {
@@ -1786,7 +1795,10 @@ fn attribute_summary(stats: &Stats, attribute: PrimaryAttribute) -> String {
             stats.bonus_max_health,
             stats.bonus_resistance * 100.0
         ),
-        PrimaryAttribute::Intelligence => "not yet wired (M8.10-12)".to_string(),
+        PrimaryAttribute::Intelligence => format!(
+            "+{:.0}% socketed rune magnitude",
+            stats.bonus_rune_magnitude * 100.0
+        ),
     }
 }
 
@@ -1963,6 +1975,14 @@ fn interaction_trigger_system(
         panels.vendor = Some(interactable.template_key.clone());
         opened_any = true;
     }
+    if template
+        .opens_panels
+        .iter()
+        .any(|p| p == RUNE_CASTING_PANEL_ID)
+    {
+        panels.rune_casting = true;
+        opened_any = true;
+    }
     if !opened_any {
         if let Some(dialog) = &template.dialog {
             panels.dialog = Some(dialog.clone());
@@ -2132,6 +2152,76 @@ fn forging_panel_system(
     }
     if !open {
         panels.forging_open = false;
+    }
+}
+
+/// Rune-casting panel (M8.10): shown when `InteractionPanels::rune_casting`
+/// is set (opened by `interaction_trigger_system` near a blacksmith/sejdr-
+/// kind `Interactable`). "Cast" spends one `UnspentRuneCasts` — the server
+/// samples up to three candidates into `RuneCastOffer` (see
+/// `game_core::request_rune_cast`); once that offer replicates back, one
+/// button per candidate lets the player confirm their pick
+/// (`SelectRuneCastInput`, resolved by `game_core::select_rune_cast`). Both
+/// actions are real round-trips, proximity-gated server-side — same
+/// "can be left open while walking away, requests just silently no-op"
+/// treatment as the forging panel.
+fn rune_casting_panel_system(
+    mut contexts: EguiContexts,
+    local_player: Res<LocalPlayer>,
+    mut panels: ResMut<InteractionPanels>,
+    query: Query<(&UnspentRuneCasts, &RuneCastOffer)>,
+    mut request_input: MessageWriter<RequestRuneCastInput>,
+    mut select_input: MessageWriter<SelectRuneCastInput>,
+) {
+    if !panels.rune_casting {
+        return;
+    }
+    let Some(entity) = local_player.0 else {
+        return;
+    };
+    let Ok((unspent, offer)) = query.get(entity) else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut open = true;
+    let mut cast_clicked = false;
+    let mut selected: Option<String> = None;
+
+    egui::Window::new("Rune Casting")
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(format!("Rune casts available: {}", unspent.0));
+            if ui
+                .add_enabled(unspent.0 > 0, egui::Button::new("Cast"))
+                .clicked()
+            {
+                cast_clicked = true;
+            }
+
+            if !offer.0.is_empty() {
+                ui.separator();
+                ui.label("Choose one:");
+                for rune_id in &offer.0 {
+                    if ui.button(rune_id).clicked() {
+                        selected = Some(rune_id.clone());
+                    }
+                }
+            }
+        });
+
+    // Deferred until after `show` closes — same reason as
+    // `inventory_panel_system`'s deferred writes.
+    if cast_clicked {
+        request_input.write(RequestRuneCastInput);
+    }
+    if let Some(rune_id) = selected {
+        select_input.write(SelectRuneCastInput { rune_id });
+    }
+    if !open {
+        panels.rune_casting = false;
     }
 }
 

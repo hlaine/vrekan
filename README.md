@@ -115,6 +115,64 @@ file, so the visual and collision geometry can't drift apart — see
 `server/src/main.rs`'s `spawn_map_colliders` doc comment for the coordinate
 convention this depends on if you add or edit maps.
 
+## Live playtest operations
+
+Operational gotchas that matter when running or guiding a live multi-client
+playtest session (as opposed to `cargo test`) — found the hard way during
+M8.10's live-testing (2026-08-07), see `DECISIONS.md` for the full traces.
+
+**Restarting the server never comes for free.** The server only persists a
+character's progress at clean disconnect (`server::on_character_disconnected`)
+— there's no periodic autosave and no graceful-shutdown save hook yet
+(tracked as a `ROADMAP.md` follow-up). Killing the server process while a
+client is still connected silently discards that character's progress since
+their last clean disconnect, with no error or warning. To restart safely:
+1. Have every connected client disconnect first — Ctrl+C on the client is
+   fine, it doesn't need to send an explicit "goodbye" packet.
+2. Wait ~10 seconds. The netcode transport's default connection timeout is
+   5 seconds; the server needs that window, *while still running*, to
+   notice the client is gone and run its own disconnect-triggered save.
+3. Only then stop/restart the server process.
+
+**Wiping saves for a genuinely fresh game**: delete the whole `saves/<name>/`
+directory (not just one character's file under `saves/<name>/characters/`)
+*and* restart the server process itself. The game password and the
+starter-loot spawn gate (`server::spawn_starter_loot`) are both checked
+against `saves/<name>/game.ron` at connect time, but the game password is
+also cached in an in-memory `GamePassword` resource that an already-running
+server process never re-reads from disk — deleting the save file alone
+doesn't reset a running server's password check or re-arm starter loot.
+
+**Two local clients need distinct character IDs.** Each client stores its
+persistent character ID in `character_id.txt` in whatever directory it's
+launched from (see "Connecting" above) — two clients launched from the same
+directory (e.g. two terminal tabs both in the repo root) silently share one
+file and therefore one character ID, so the second connection gets rejected
+as "already connected." Launch the second with an explicit path argument:
+`cargo run -p client -- character_id_p2.txt`.
+
+**Check the scenario's actual premises before sending someone off to test
+it.** Before asking someone to live-test a specific scenario (not just
+"try the new thing generally"), verify the preconditions it needs actually
+hold in the current world/save state, and say so up front rather than
+discovering it's impossible partway through. Found the hard way during
+M8.10: asking for a live level-up to test rune casting turned out to be
+structurally impossible in a single server session — `spawn_enemies`
+places exactly one enemy per `assets/enemies/*.ron` file (two total,
+worth 25 XP combined, no respawn system exists), nowhere near the 100 XP
+`xp_required(1)` needs for level 2. If a scenario needs state that's
+impractical or impossible to reach organically (a level-up, a rare drop,
+a specific `Attributes` value), **it's fine to bootstrap it directly by
+hand-editing the relevant `saves/<name>/characters/<id>.ron` file** —
+it's just RON, and it's only ever read at connect time, so edit it while
+that character is *disconnected* (same clean-disconnect wait as any other
+save edit), then restart the server on the same save (no wipe) and have
+them reconnect. This is legitimate test setup, not something to hide —
+say plainly what was hand-set and why, so a "confirmed live" claim
+afterward is understood to cover the mechanism being tested (the actual
+round trip), not the bootstrapped precondition (reaching that XP/level
+organically, which stays untested and should be noted as such).
+
 ## Testing
 
 ```bash

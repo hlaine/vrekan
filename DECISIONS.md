@@ -1750,3 +1750,191 @@ destructible template, added specifically to give the `movable: false`
 (default) branch a real, live-placed content example rather than only
 being covered by the two pre-existing static templates changing meaning
 implicitly.
+
+## M8.10: rune discovery & learning — a new request/select round trip for
+## casting, and Intelligence's rune-magnitude hook wired generically, not
+## just for one formula
+
+Built autonomously (session continued from M8.9's commit/push with no new
+user design input beyond "start M8.10"), then handed to the user for a
+live playtest before commit. `PROTOCOL_ID` bumped 4→5, flagged before
+touching `protocol` per `CLAUDE.md`'s rule (four new replicated
+components — `DiscoveredRunes`/`KnownRunes`/`UnspentRuneCasts`/
+`RuneCastOffer` — plus two new client messages): no save-file break beyond
+the usual "old saves need a fresh character" cost `CharacterSave`'s three
+new required fields (`discovered_runes`/`known_runes`/`rune_casts`)
+already impose without a `#[serde(default)]`, same precedent every earlier
+`CharacterSave` addition has set.
+
+**Casting needed a genuinely new interaction shape, not a reuse of an
+existing one.** Every prior panel action (`socket_rune`, `buy_item`,
+`allocate_stat_point`) is a single atomic client→server round trip:
+press a button, server validates and applies, done. MECHANICS.md's rune
+casting is a two-step affair — spend a point, see 3 random candidates,
+*then* pick one — which doesn't fit that shape. Modeled as two messages
+instead of one: `RequestRuneCastInput` (spends the point, server samples
+into a new replicated `RuneCastOffer` component) and `SelectRuneCastInput`
+(confirms one of the offered candidates into `KnownRunes`). The spend
+happens at request time, not selection time — "spending one
+`UnspentRuneCasts`" reads most naturally as the cost of the divination act
+itself (MECHANICS.md's own framing), not of the subsequent choice, and it
+avoids a "free reroll by never picking" exploit if selection carried no
+cost. **Confirmed with the user before implementing**, not guessed at,
+since the alternative reading (spend on selection) was equally plausible
+without more context.
+
+**`RuneCastOffer`'s selection step is deliberately *not* re-checked for
+proximity, unlike the request.** `apply_request_rune_cast_input` requires
+`RUNE_CASTING_PANEL_ID` range (same `nearest_interactable_with_panel`
+pattern as forging); `apply_select_rune_cast_input` doesn't. The offer
+only ever exists because the request already passed that gate, and
+stranding a player's pending pick because they took two steps away from
+the blacksmith mid-choice would be a worse experience than the
+inconsistency costs — a real, disclosed judgment call, not an oversight.
+
+**Intelligence's rune-magnitude scaling was wired at the shared
+`Equipment::stat_bonus` level, not duplicated per formula.** MECHANICS.md
+says "rune magnitude scales with Intelligence... computed at the same
+point `Equipment::stat_bonus` already sums rune contributions" — taken
+literally, this means *every* stat a rune can grant (crit chance/
+multiplier, attack speed, move speed — whatever `Stat` covers today or
+gains later) gets the same `(1.0 + intelligence_bonus)` multiplier
+automatically, not just a hypothetical "rune power" formula invented for
+this milestone. `stat_bonus` gained one new parameter
+(`intelligence_bonus: f32`) rather than a second bespoke function, and
+every call site threads it from `Stats::bonus_rune_magnitude` (a new
+derived field, `Attributes::intelligence * 0.02` per point — tuning data)
+— `combat::resolve_melee_hit`'s crit stats, `weapon_attack::
+effective_attack_speed_bonus`, and `server`'s `apply_move_input` for move
+speed all pick it up for free from this one change. A non-caster (an
+enemy, which never has `Stats`) passes `0.0`, a no-op multiplier — matches
+`Equipment::stat_bonus`'s existing "missing reference/data is a no-op, not
+an error" convention.
+
+**`socket_rune` gained the `KnownRunes` gate exactly where `ROADMAP.md`
+scoped it** — physical stock in `RuneInventory` is no longer sufficient by
+itself, matching MECHANICS.md's explicit wording. `M8.11`/`M8.12`'s
+combine functions don't exist yet, so this pass only touches the one
+already-shipped gate point.
+
+**`grant_xp` needed `Attributes::intelligence` threaded through, which
+meant widening `AttackerProgress`/`SkillCasters`/`TickingPlayers` again**
+— the same "add one more `Option<&mut T>`/`Option<&T>` field, thread it
+through every call site and test fixture" mechanical cost M8.7's
+`Stats` threading and M8.8's `Commands` threading already established as
+routine for this codebase's shared hit-resolution helpers. One test
+regression caught and fixed by this: `attack_system_grants_xp_to_attacker_
+on_killing_blow`'s fixture didn't spawn `UnspentRuneCasts`, so the
+now-five-way `Some(...)` match silently skipped the whole XP grant
+(including the stat/skill points it always granted before) — not a logic
+bug, a stale test fixture missing a newly-required component, caught
+immediately by the test itself failing, not by review.
+
+**A new direct workspace dependency, flagged rather than silently
+added:** `server` needed `rand::rng()` for `apply_request_rune_cast_input`'s
+shuffle-sample, so `rand` (already an exact-pinned `[workspace.dependencies]`
+entry used by `game_core`/`content`) was added to `server/Cargo.toml`
+directly. Not a new crate to the dependency tree as a whole — just the
+first time `server`'s own binary links it — but flagged per `CLAUDE.md`'s
+"new external dependencies" rule regardless, since the rule is about a
+crate gaining a new dependency edge, not about whether the ecosystem has
+seen the crate before.
+
+**Content additions, both minimal and deliberate:** `blacksmith.ron`
+gained `"rune_casting"` to its existing `opens_panels` list (no new NPC —
+MECHANICS.md's "blacksmith/sejdr" wording already treats the blacksmith as
+a valid rune-casting host, and a dedicated sejdr NPC has no other content
+role yet to justify existing this pass). `runestone.ron` gained
+`grants_rune: Some("swift_shard")` alongside its existing crit-chance
+buff — one interactable now exercises *both* payload shapes at once,
+which is the minimal real content proof for the direct-grant path without
+inventing a new placeholder NPC solely to hold one field.
+
+## M8.10 live-debugging detour: a false-alarm bug report, and a decision to
+## keep the diagnostic logging permanently rather than delete it
+
+Live playtesting this pass surfaced a chain of confusion, not a single
+clean bug: "no rune at starter loot," then (after ruling out several red
+herrings — a stale in-memory `GamePassword` resource from a long-running
+server process, a shared `character_id.txt` across two clients launched
+from the same directory, `spawn_starter_loot`'s "only fires for a genuinely
+new game" gate) a screenshot showing an empty Inventory panel and, later,
+an empty Forging panel with no socketable runes. Each of these had a real,
+correct explanation already covered elsewhere in this log or in existing
+`DECISIONS.md`/`ROADMAP.md` precedent (runes were never displayed in the
+Inventory panel, only Forging; the empty-Forging screenshot turned out to
+be from a stale pre-wipe server session). To settle the last open question
+definitively rather than keep reasoning from screenshots, temporary
+`tracing::debug!` instrumentation was added to `interact_or_pickup_system`
+and the server re-run live — the log conclusively showed `RuneInventory`/
+`DiscoveredRunes` populating correctly on pickup. The actual "bug" was
+terminology: the user didn't realize `crit_shard`/`swift_shard` (the
+existing M7 rune content files) *are* the runes — no code defect existed
+anywhere in this chain.
+
+**The logging itself became a real decision, not just a throwaway
+artifact.** First instinct was to delete the temporary instrumentation
+once it had served its diagnostic purpose, matching this project's
+"temporary diagnostic code gets stripped" precedent (M8.5's
+`FrameTimeDiagnosticsPlugin`, M8's temporary interactable-naming debug
+prints). The user pushed back and asked for the reasoning to be made
+explicit rather than defaulting silently. On reflection, `weapon_attack.rs`
+already sets a *different*, equally valid precedent: permanent
+`tracing::debug!` calls on meaningful state transitions (windup start, hit
+resolution), added because that pass "had no live coverage at build time,"
+gated behind `RUST_LOG=info,game_core=debug` so they're silent unless
+asked for, and already reused twice this session for real debugging (the
+original `AttackInput` channel-drop bug, and now this). `interact_or_
+pickup_system` resolves every pickup/interact action in the game and had
+*zero* debug instrumentation before this — a real, ongoing gap, not a
+one-off need, especially with M8.11/M8.12 both about to touch this same
+rune-inventory path again. **Decision: keep a trimmed version
+permanently** — the two per-keypress lines that fired on every single
+button press regardless of outcome ("resolving," "nothing in range") were
+dropped as noise, but the three meaningful-transition lines (picking up a
+drop, the resulting rune state, and a direct `grants_rune` grant) stay in
+the codebase going forward, matching `weapon_attack.rs`'s shape exactly.
+
+## M8.10 live-debugging discovery: `kill`ing the server mid-session
+## silently discards unsaved player progress — a pre-existing gap, not a
+## new bug, now tracked as its own follow-up
+
+Restarting the server repeatedly during this session's live-debugging loop
+(rebuilding after each code change) surfaced a real, separate problem from
+anything M8.10 itself introduced: a player who reconnected after one of
+these restarts found their character reset to a blank slate — no coins, no
+inventory, no picked-up runes — despite `saves/default/` never having been
+wiped this time.
+
+**Root cause, traced rather than guessed at**: this project's persistence
+model has been save-on-disconnect-only since M5 — `persistence::
+save_character_save` is only ever called from `on_client_connected`'s
+initial-creation branch and from `on_character_disconnected`, an *observer*
+reacting to a client's `ConnectedClient` component actually being removed
+(i.e. a real disconnect event flowing through Bevy's normal ECS schedule).
+`kill <pid>` sends `SIGTERM`, which terminates the process immediately —
+nothing in this codebase installs a signal handler to intercept that, so
+the process just dies mid-schedule, and `on_character_disconnected` never
+gets a tick to run. Every one of this session's several `kill`-and-restart
+cycles therefore discarded each connected player's progress since their
+*previous* clean disconnect, with no error or warning anywhere — the
+reconnecting client simply loaded whatever was last actually written to
+disk, which for a session that never cleanly disconnected was still the
+just-created blank character.
+
+This is **not a bug in any shipped M8.10 (or earlier) game logic** — the
+save-on-disconnect design itself is fine for normal play (a player quitting
+their client cleanly triggers the exact same save path that's always
+worked). It's a genuine operational gap this session's unusually long
+live-debugging loop happened to expose repeatedly, in a way normal
+gameplay wouldn't: nobody previously needed to hard-kill and restart the
+server mid-session across many iterations in one sitting.
+
+**Consequence, per the user's explicit instruction**: not fixed in this
+session (that would be new, unplanned scope mid-milestone) — tracked as
+its own `ROADMAP.md` follow-up (`M8.10 follow-up — graceful server
+shutdown save`), flagged high priority since it'll keep costing live-test
+progress on every future session that needs to restart the server
+mid-playtest. The immediate practical mitigation going forward: ask
+whoever's connected to cleanly quit their client *before* the server gets
+restarted, rather than restarting out from under an active connection.

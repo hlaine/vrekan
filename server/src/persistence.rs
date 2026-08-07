@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use game_core::{
-    Attributes, Currency, Equipment, Inventory, KnownSkills, Level, RuneInventory, Stats,
-    UnspentSkillPoints, UnspentStatPoints,
+    Attributes, Currency, DiscoveredRunes, Equipment, Inventory, KnownRunes, KnownSkills, Level,
+    RuneInventory, Stats, UnspentRuneCasts, UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,9 @@ pub struct CharacterSave {
     pub equipment: Equipment,
     pub runes: RuneInventory,
     pub currency: Currency,
+    pub discovered_runes: DiscoveredRunes,
+    pub known_runes: KnownRunes,
+    pub rune_casts: UnspentRuneCasts,
 }
 
 /// Mirrors `content::ContentError`'s shape — this is the same kind of
@@ -210,6 +213,9 @@ mod tests {
             equipment: Equipment::default(),
             runes: RuneInventory::default(),
             currency: Currency(50),
+            discovered_runes: DiscoveredRunes::default(),
+            known_runes: KnownRunes::default(),
+            rune_casts: UnspentRuneCasts::default(),
         };
 
         save_character_save(&dir, "some_game", 777, &save).unwrap();

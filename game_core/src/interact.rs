@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::economy::Currency;
 use crate::item::{pickup_loot, Inventory, ItemDrop, RuneInventory};
 use crate::movement::Position;
+use crate::rune::{DiscoveredRunes, KnownRunes};
 use crate::status_effect::{ActiveEffects, EffectDefinition};
 
 /// How close a player needs to be to a dropped item/rune to pick it up, when
@@ -26,6 +27,11 @@ pub const FORGING_PANEL_ID: &str = "forging";
 /// The `opens_panels` value that gates buy/sell to vendor-kind
 /// `Interactable`s — same shared-identifier reasoning as `FORGING_PANEL_ID`.
 pub const VENDOR_PANEL_ID: &str = "vendor";
+
+/// The `opens_panels` value that gates the M8.10 rune-casting panel to
+/// blacksmith/sejdr-kind `Interactable`s — same shared-identifier reasoning
+/// as `FORGING_PANEL_ID`.
+pub const RUNE_CASTING_PANEL_ID: &str = "rune_casting";
 
 /// A world entity a player can trigger with the interact button (`E`) —
 /// an NPC (blacksmith, sage) or a world object (runestone). Replicated as
@@ -53,10 +59,19 @@ pub struct Interactable {
 /// button press, not a server-resolved outcome. A `Vec` rather than a
 /// single `Option<String>`, since one NPC can offer more than one
 /// capability (e.g. a blacksmith is both `"forging"` and `"vendor"`).
+///
+/// `grants_rune` (M8.10) is a direct-grant payload — a sejdr encounter or
+/// cleared objective can hand a *specific* rune straight into `KnownRunes`,
+/// bypassing the rune-casting panel entirely (see MECHANICS.md's "Learning,
+/// via direct grant" note). Applied unconditionally alongside `effect`
+/// (same "there's no attacker here" reasoning), and naturally claimable
+/// only once in effect — `KnownRunes` is a set, so a repeat interaction is a
+/// no-op insert, no separate "already claimed" bookkeeping needed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InteractableDefinition {
     pub effect: Option<EffectDefinition>,
     pub opens_panels: Vec<String>,
+    pub grants_rune: Option<String>,
 }
 
 /// Maps an `Interactable::template_key` to its `InteractableDefinition` —
@@ -138,6 +153,7 @@ pub fn nearest_interactable_with_panel<'a>(
 /// priority rule (see `DECISIONS.md`'s M8 planning entry) — a player
 /// standing near both an `Interactable` and a loose item drop always
 /// interacts, never picks up, regardless of which is actually closer.
+#[allow(clippy::too_many_arguments)] // one query/param per rendered/resolved concern, inherent to this system's job
 pub fn interact_or_pickup_system(
     mut events: MessageReader<InteractOrPickupRequested>,
     mut actors: Query<(
@@ -146,6 +162,8 @@ pub fn interact_or_pickup_system(
         &mut RuneInventory,
         &mut Currency,
         &mut ActiveEffects,
+        &mut DiscoveredRunes,
+        &mut KnownRunes,
     )>,
     interactables: Query<(&Position, &Interactable)>,
     drops: Query<(Entity, &Position, &ItemDrop)>,
@@ -153,8 +171,15 @@ pub fn interact_or_pickup_system(
     mut commands: Commands,
 ) {
     for event in events.read() {
-        let Ok((actor_pos, mut inventory, mut runes, mut currency, mut effects)) =
-            actors.get_mut(event.actor)
+        let Ok((
+            actor_pos,
+            mut inventory,
+            mut runes,
+            mut currency,
+            mut effects,
+            mut discovered,
+            mut known,
+        )) = actors.get_mut(event.actor)
         else {
             continue;
         };
@@ -162,12 +187,19 @@ pub fn interact_or_pickup_system(
         let nearest_interactable = nearest_interactable_in_range(actor_pos, interactables.iter());
 
         if let Some(interactable) = nearest_interactable {
-            if let Some(effect) = library
-                .0
-                .get(&interactable.template_key)
-                .and_then(|definition| definition.effect.clone())
-            {
-                effects.apply(effect);
+            if let Some(definition) = library.0.get(&interactable.template_key) {
+                if let Some(effect) = definition.effect.clone() {
+                    effects.apply(effect);
+                }
+                if let Some(rune_id) = definition.grants_rune.clone() {
+                    discovered.0.insert(rune_id.clone());
+                    known.0.insert(rune_id.clone());
+                    tracing::debug!(
+                        actor = ?event.actor,
+                        %rune_id,
+                        "interact_or_pickup: granted rune directly via interactable"
+                    );
+                }
             }
             continue;
         }
@@ -180,7 +212,25 @@ pub fn interact_or_pickup_system(
         let Some((drop_entity, _, drop)) = nearest_drop else {
             continue;
         };
-        pickup_loot(&mut inventory, &mut runes, &mut currency, drop.0.clone());
+        tracing::debug!(
+            actor = ?event.actor,
+            ?drop_entity,
+            loot = ?drop.0,
+            "interact_or_pickup: picking up"
+        );
+        pickup_loot(
+            &mut inventory,
+            &mut runes,
+            &mut currency,
+            &mut discovered,
+            drop.0.clone(),
+        );
+        tracing::debug!(
+            actor = ?event.actor,
+            rune_inventory = ?runes.0,
+            discovered_runes = ?discovered.0,
+            "interact_or_pickup: post-pickup rune state"
+        );
         commands.entity(drop_entity).despawn();
     }
 }
@@ -192,13 +242,23 @@ mod tests {
     use crate::status_effect::{EffectKind, StackMode, Stat};
     use bevy_ecs::system::RunSystemOnce;
 
-    fn actor_bundle() -> (Position, Inventory, RuneInventory, Currency, ActiveEffects) {
+    fn actor_bundle() -> (
+        Position,
+        Inventory,
+        RuneInventory,
+        Currency,
+        ActiveEffects,
+        DiscoveredRunes,
+        KnownRunes,
+    ) {
         (
             Position { x: 0.0, y: 0.0 },
             Inventory::default(),
             RuneInventory::default(),
             Currency::default(),
             ActiveEffects::default(),
+            DiscoveredRunes::default(),
+            KnownRunes::default(),
         )
     }
 
@@ -233,6 +293,7 @@ mod tests {
             InteractableDefinition {
                 effect: Some(crit_buff()),
                 opens_panels: vec![],
+                grants_rune: None,
             },
         );
         world.insert_resource(library);
@@ -318,6 +379,7 @@ mod tests {
             InteractableDefinition {
                 effect: Some(crit_buff()),
                 opens_panels: vec![],
+                grants_rune: None,
             },
         );
         world.insert_resource(library);
@@ -376,6 +438,7 @@ mod tests {
             InteractableDefinition {
                 effect: Some(crit_buff()),
                 opens_panels: vec![],
+                grants_rune: None,
             },
         );
         library.0.insert(
@@ -383,6 +446,7 @@ mod tests {
             InteractableDefinition {
                 effect: None,
                 opens_panels: vec![],
+                grants_rune: None,
             },
         );
         world.insert_resource(library);
@@ -449,6 +513,7 @@ mod tests {
             InteractableDefinition {
                 effect: None,
                 opens_panels: vec![FORGING_PANEL_ID.to_string()],
+                grants_rune: None,
             },
         );
         library.0.insert(
@@ -456,6 +521,7 @@ mod tests {
             InteractableDefinition {
                 effect: None,
                 opens_panels: vec![],
+                grants_rune: None,
             },
         );
         library
@@ -545,5 +611,80 @@ mod tests {
             ),
             Some(&blacksmith)
         );
+    }
+
+    #[test]
+    fn grants_rune_from_nearest_interactable_adds_it_to_known_and_discovered() {
+        let mut world = World::new();
+        world.init_resource::<Messages<InteractOrPickupRequested>>();
+        let mut library = InteractableLibrary::default();
+        library.0.insert(
+            "sejdr".to_string(),
+            InteractableDefinition {
+                effect: None,
+                opens_panels: vec![],
+                grants_rune: Some("thurisaz".to_string()),
+            },
+        );
+        world.insert_resource(library);
+
+        let actor = world.spawn(actor_bundle()).id();
+        world.spawn((
+            Position { x: 10.0, y: 0.0 },
+            Interactable {
+                template_key: "sejdr".to_string(),
+                range: 50.0,
+            },
+        ));
+
+        world
+            .resource_mut::<Messages<InteractOrPickupRequested>>()
+            .write(InteractOrPickupRequested { actor });
+
+        let _ = world.run_system_once(interact_or_pickup_system);
+
+        assert!(world
+            .get::<KnownRunes>(actor)
+            .unwrap()
+            .0
+            .contains("thurisaz"));
+        assert!(world
+            .get::<DiscoveredRunes>(actor)
+            .unwrap()
+            .0
+            .contains("thurisaz"));
+    }
+
+    #[test]
+    fn an_interactable_with_no_grants_rune_leaves_known_runes_untouched() {
+        let mut world = World::new();
+        world.init_resource::<Messages<InteractOrPickupRequested>>();
+        let mut library = InteractableLibrary::default();
+        library.0.insert(
+            "runestone".to_string(),
+            InteractableDefinition {
+                effect: Some(crit_buff()),
+                opens_panels: vec![],
+                grants_rune: None,
+            },
+        );
+        world.insert_resource(library);
+
+        let actor = world.spawn(actor_bundle()).id();
+        world.spawn((
+            Position { x: 10.0, y: 0.0 },
+            Interactable {
+                template_key: "runestone".to_string(),
+                range: 50.0,
+            },
+        ));
+
+        world
+            .resource_mut::<Messages<InteractOrPickupRequested>>()
+            .write(InteractOrPickupRequested { actor });
+
+        let _ = world.run_system_once(interact_or_pickup_system);
+
+        assert!(world.get::<KnownRunes>(actor).unwrap().0.is_empty());
     }
 }

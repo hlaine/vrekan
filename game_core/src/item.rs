@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::combat::{DamageType, Resistances};
 use crate::economy::Currency;
+use crate::rune::{DiscoveredRunes, KnownRunes};
 use crate::status_effect::Stat;
 use crate::weapon_attack::WeaponStats;
 
@@ -116,7 +117,14 @@ impl Equipment {
     /// slots — computed fresh at point of use (see `combat::attack_system`'s
     /// effective-stats computation), not merged into the item permanently,
     /// so unsocketing a rune can't leave a stale bonus behind.
-    pub fn stat_bonus(&self, stat: Stat, runes: &RuneLibrary) -> f32 {
+    ///
+    /// `intelligence_bonus` scales each rune's own `magnitude` by
+    /// `(1.0 + intelligence_bonus)` before summing — MECHANICS.md's "Rune
+    /// magnitude scales with Intelligence" note, the primary mechanical hook
+    /// for that attribute (M8.10). Pass `0.0` for a non-player caller (e.g.
+    /// an enemy, which never has `Attributes`) — the multiplier is then
+    /// exactly `1.0`, a no-op.
+    pub fn stat_bonus(&self, stat: Stat, runes: &RuneLibrary, intelligence_bonus: f32) -> f32 {
         [&self.weapon, &self.armor, &self.helmet]
             .into_iter()
             .flatten()
@@ -124,7 +132,7 @@ impl Equipment {
             .filter_map(|socket| socket.as_deref())
             .filter_map(|rune_id| runes.0.get(rune_id))
             .filter(|rune| rune.stat == stat)
-            .map(|rune| rune.magnitude)
+            .map(|rune| rune.magnitude * (1.0 + intelligence_bonus))
             .sum()
     }
 
@@ -244,16 +252,23 @@ pub fn roll_loot(
 
 /// Merges a dropped loot into the picker's inventory/rune counts/currency
 /// balance — an item goes onto the (unbounded, for now) inventory list, a
-/// rune increments its stack count, currency adds onto the balance.
+/// rune increments its stack count, currency adds onto the balance. A rune
+/// pickup also adds its id to `discovered` (see MECHANICS.md's "Discovery"
+/// note) — `HashSet::insert` is already a no-op on an already-discovered
+/// rune, so a stack-only repeat pickup needs no separate branch.
 pub fn pickup_loot(
     inventory: &mut Inventory,
     runes: &mut RuneInventory,
     currency: &mut Currency,
+    discovered: &mut DiscoveredRunes,
     loot: DroppedLoot,
 ) {
     match loot {
         DroppedLoot::Item(item) => inventory.0.push(item),
-        DroppedLoot::Rune(rune_id) => *runes.0.entry(rune_id).or_insert(0) += 1,
+        DroppedLoot::Rune(rune_id) => {
+            discovered.0.insert(rune_id.clone());
+            *runes.0.entry(rune_id).or_insert(0) += 1;
+        }
         DroppedLoot::Currency(amount) => currency.0 += amount,
     }
 }
@@ -297,19 +312,26 @@ pub fn unequip_item(inventory: &mut Inventory, equipment: &mut Equipment, slot: 
 /// `socket_index`, consuming one from the stack and charging its
 /// `RuneDefinition::socket_cost` from `currency`. Rejects (returns
 /// `false`, no state changed — including no currency deducted) an
-/// unknown rune id, insufficient currency, an empty stack, a missing
-/// equipped item at `slot`, an out-of-range socket index, or an
-/// already-occupied socket — all untrusted-input cases, not invariant
-/// violations.
+/// unknown rune id, a rune not yet in `known` (M8.10 — see
+/// MECHANICS.md's Runes section: physical stock alone isn't enough,
+/// regardless of how many copies are on hand), insufficient currency, an
+/// empty stack, a missing equipped item at `slot`, an out-of-range socket
+/// index, or an already-occupied socket — all untrusted-input cases, not
+/// invariant violations.
+#[allow(clippy::too_many_arguments)] // one input per independently-validated precondition; a params struct wouldn't clarify this
 pub fn socket_rune(
     equipment: &mut Equipment,
     runes: &mut RuneInventory,
     rune_library: &RuneLibrary,
     currency: &mut Currency,
+    known: &KnownRunes,
     slot: EquipSlot,
     socket_index: usize,
     rune_id: &str,
 ) -> bool {
+    if !known.0.contains(rune_id) {
+        return false;
+    }
     let Some(definition) = rune_library.0.get(rune_id) else {
         return false;
     };
@@ -376,6 +398,10 @@ mod tests {
             template_key: template_key.to_string(),
             sockets: vec![None; socket_count],
         }
+    }
+
+    fn known(rune_ids: &[&str]) -> KnownRunes {
+        KnownRunes(rune_ids.iter().map(|id| id.to_string()).collect())
     }
 
     #[test]
@@ -485,12 +511,14 @@ mod tests {
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
         let mut currency = Currency(10);
+        let known = known(&["crit_shard"]);
 
         assert!(socket_rune(
             &mut equipment,
             &mut runes,
             &library,
             &mut currency,
+            &known,
             EquipSlot::Weapon,
             0,
             "crit_shard",
@@ -514,12 +542,14 @@ mod tests {
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
         let mut currency = Currency(9);
+        let known = known(&["crit_shard"]);
 
         assert!(!socket_rune(
             &mut equipment,
             &mut runes,
             &library,
             &mut currency,
+            &known,
             EquipSlot::Weapon,
             0,
             "crit_shard",
@@ -540,17 +570,47 @@ mod tests {
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
         let mut currency = Currency(10);
+        let known = known(&["crit_shard"]);
 
         assert!(!socket_rune(
             &mut equipment,
             &mut runes,
             &library,
             &mut currency,
+            &known,
             EquipSlot::Weapon,
             0,
             "crit_shard",
         ));
         assert_eq!(currency.0, 10);
+    }
+
+    #[test]
+    fn socket_rune_rejects_an_unknown_rune_even_with_stock_and_currency() {
+        let mut equipment = Equipment {
+            weapon: Some(item("sword", 1)),
+            ..Default::default()
+        };
+        let mut runes = RuneInventory(HashMap::from([("crit_shard".to_string(), 1)]));
+        let mut library = RuneLibrary::default();
+        library.0.insert("crit_shard".to_string(), crit_rune());
+        let mut currency = Currency(10);
+        let known = KnownRunes::default(); // crit_shard not learned
+
+        assert!(!socket_rune(
+            &mut equipment,
+            &mut runes,
+            &library,
+            &mut currency,
+            &known,
+            EquipSlot::Weapon,
+            0,
+            "crit_shard",
+        ));
+
+        assert_eq!(currency.0, 10);
+        assert_eq!(runes.0["crit_shard"], 1);
+        assert!(equipment.weapon.unwrap().sockets[0].is_none());
     }
 
     #[test]
@@ -566,12 +626,14 @@ mod tests {
         let mut library = RuneLibrary::default();
         library.0.insert("crit_shard".to_string(), crit_rune());
         let mut currency = Currency(10);
+        let known = known(&["crit_shard"]);
 
         assert!(!socket_rune(
             &mut equipment,
             &mut runes,
             &library,
             &mut currency,
+            &known,
             EquipSlot::Weapon,
             0,
             "crit_shard",
@@ -645,11 +707,30 @@ mod tests {
             helmet: None,
         };
 
-        let crit_bonus = equipment.stat_bonus(Stat::CritChance, &library);
-        let speed_bonus = equipment.stat_bonus(Stat::MoveSpeed, &library);
+        let crit_bonus = equipment.stat_bonus(Stat::CritChance, &library, 0.0);
+        let speed_bonus = equipment.stat_bonus(Stat::MoveSpeed, &library, 0.0);
 
         assert!((crit_bonus - 0.10).abs() < 1e-6);
         assert!((speed_bonus - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equipment_stat_bonus_scales_rune_magnitude_by_intelligence_bonus() {
+        let mut library = RuneLibrary::default();
+        library.0.insert("crit_shard".to_string(), crit_rune());
+        let equipment = Equipment {
+            weapon: Some(Item {
+                template_key: "sword".to_string(),
+                sockets: vec![Some("crit_shard".to_string())],
+            }),
+            ..Default::default()
+        };
+
+        // crit_rune()'s magnitude is 0.05; a 0.5 intelligence bonus should
+        // scale it to 0.05 * 1.5 = 0.075.
+        let bonus = equipment.stat_bonus(Stat::CritChance, &library, 0.5);
+
+        assert!((bonus - 0.075).abs() < 1e-6);
     }
 
     #[test]
@@ -705,41 +786,48 @@ mod tests {
         let mut inventory = Inventory::default();
         let mut runes = RuneInventory::default();
         let mut currency = Currency::default();
+        let mut discovered = DiscoveredRunes::default();
 
         pickup_loot(
             &mut inventory,
             &mut runes,
             &mut currency,
+            &mut discovered,
             DroppedLoot::Item(item("sword", 0)),
         );
         pickup_loot(
             &mut inventory,
             &mut runes,
             &mut currency,
+            &mut discovered,
             DroppedLoot::Rune("crit_shard".to_string()),
         );
         pickup_loot(
             &mut inventory,
             &mut runes,
             &mut currency,
+            &mut discovered,
             DroppedLoot::Rune("crit_shard".to_string()),
         );
         pickup_loot(
             &mut inventory,
             &mut runes,
             &mut currency,
+            &mut discovered,
             DroppedLoot::Currency(15),
         );
         pickup_loot(
             &mut inventory,
             &mut runes,
             &mut currency,
+            &mut discovered,
             DroppedLoot::Currency(10),
         );
 
         assert_eq!(inventory.0.len(), 1);
         assert_eq!(runes.0["crit_shard"], 2);
         assert_eq!(currency.0, 25);
+        assert!(discovered.0.contains("crit_shard"));
     }
 
     #[test]

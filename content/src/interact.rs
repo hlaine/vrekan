@@ -16,7 +16,9 @@ use crate::ContentError;
 /// resolved server-side into `game_core::InteractableDefinition` via
 /// `into_definition`. `opens_panels` is a list, not a single value — one
 /// NPC can offer more than one capability (e.g. a blacksmith is both
-/// `"forging"` and `"vendor"`).
+/// `"forging"` and `"vendor"`). `grants_rune` (M8.10) is a direct rune
+/// grant (id of a rune template) bypassing the rune-casting panel — see
+/// `game_core::InteractableDefinition`'s doc comment.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct InteractableTemplate {
     pub range: f32,
@@ -26,6 +28,8 @@ pub struct InteractableTemplate {
     pub effect: Option<EffectTemplate>,
     #[serde(default)]
     pub opens_panels: Vec<String>,
+    #[serde(default)]
+    pub grants_rune: Option<String>,
 }
 
 impl InteractableTemplate {
@@ -33,6 +37,7 @@ impl InteractableTemplate {
         InteractableDefinition {
             effect: self.effect.map(EffectTemplate::into_definition),
             opens_panels: self.opens_panels,
+            grants_rune: self.grants_rune,
         }
     }
 }
@@ -117,6 +122,7 @@ mod tests {
             dialog: None,
             effect: None,
             opens_panels: vec!["forging".to_string(), "vendor".to_string()],
+            grants_rune: None,
         };
 
         let definition = template.into_definition();
