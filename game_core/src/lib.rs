@@ -12,8 +12,9 @@ pub mod status_effect;
 pub mod weapon_attack;
 
 pub use combat::{
-    is_within_attack_arc, AttackRequested, AttackTimer, CombatStats, DamageType, Health,
-    MeleeAttack, Resistances, MELEE_ARC_HALF_ANGLE_RADIANS,
+    is_critically_low_health, is_within_attack_arc, AttackRequested, AttackTimer, CombatStats,
+    DamageType, Health, MeleeAttack, RecentCrit, Resistances, CRITICALLY_LOW_HEALTH_THRESHOLD,
+    MELEE_ARC_HALF_ANGLE_RADIANS,
 };
 pub use economy::{
     buy_item, sell_item, socketed_item_sell_value, Currency, VendorLibrary, VendorListing,

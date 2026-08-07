@@ -54,6 +54,23 @@ pub fn apply_damage(health: &mut Health, amount: f32) {
     health.current = (health.current - amount).max(0.0);
 }
 
+/// Fraction of `max` health below which an entity is "critically low" —
+/// MECHANICS.md's Combat feedback section: a continuous bleeding-out visual
+/// persists below this threshold, nothing shown above it. Tuning data, not
+/// a settled number.
+pub const CRITICALLY_LOW_HEALTH_THRESHOLD: f32 = 0.25;
+
+/// Pure function so the threshold-crossing logic is testable without a
+/// running Bevy app (M8.8's bleeding visual is entirely client-side —
+/// `client` calls this directly off replicated `Health`, no new
+/// replication needed) and so both crates can't drift on what "critically
+/// low" means if this is ever consulted server-side too. `max <= 0.0`
+/// reads as not-low (a malformed/zero-max entity has nothing meaningful to
+/// bleed) rather than dividing by zero.
+pub fn is_critically_low_health(health: &Health) -> bool {
+    health.max > 0.0 && health.current / health.max < CRITICALLY_LOW_HEALTH_THRESHOLD
+}
+
 /// Identifies a kind of damage (e.g. "primal", "holy") for resistance
 /// lookups. A data-keyed string rather than a fixed enum, so new damage
 /// types can be added as content, not engine changes — see DESIGN.md's
@@ -92,6 +109,16 @@ pub struct CombatStats {
     pub crit_multiplier: f32,
 }
 
+/// The final damage amount from a single `resolve_damage` call, plus
+/// whether it crit — M8.8 needs the crit flag itself (to drive
+/// `RecentCrit`), not just the resulting number, without every caller
+/// re-deriving the crit roll on its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DamageResult {
+    pub amount: f32,
+    pub is_crit: bool,
+}
+
 /// Resolves MECHANICS.md's damage formula: a crit is rolled and applied to
 /// `base_damage` first, then the target's resistance for `damage_type` is
 /// applied. `rng` is generic so tests can inject a seeded RNG for
@@ -103,14 +130,15 @@ pub fn resolve_damage(
     attacker_stats: &CombatStats,
     target_resistances: &Resistances,
     rng: &mut impl Rng,
-) -> f32 {
+) -> DamageResult {
     let is_crit = rng.random_bool(attacker_stats.crit_chance as f64);
     let after_crit = if is_crit {
         base_damage * attacker_stats.crit_multiplier
     } else {
         base_damage
     };
-    after_crit * (1.0 - target_resistances.get(damage_type))
+    let amount = after_crit * (1.0 - target_resistances.get(damage_type));
+    DamageResult { amount, is_crit }
 }
 
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -141,6 +169,39 @@ pub fn tick_attack_timers(delta: Res<DeltaSeconds>, mut query: Query<&mut Attack
     let dt = delta.0;
     for mut timer in &mut query {
         timer.0 = (timer.0 - dt).max(0.0);
+    }
+}
+
+/// Short-lived marker inserted on a target the instant a hit against it
+/// crits (see `resolve_melee_hit`), driving a client-side light/particle
+/// flourish (M8.8) — a marker, not a floating damage number, per
+/// MECHANICS.md's Combat feedback section. Replicated like `Downed`/
+/// `Stunned`. Holds its own remaining seconds (rather than being a bare
+/// unit-struct marker like those two) since nothing else already tracks a
+/// per-crit countdown the way `ActiveEffects` tracks status-effect
+/// durations — this is the one place that timer needs to live.
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RecentCrit(pub f32);
+
+/// How long `RecentCrit` stays present after a crit lands — tuning data,
+/// not a settled number.
+pub const RECENT_CRIT_DURATION: f32 = 0.4;
+
+/// Counts down every `RecentCrit` and removes it once expired — same shape
+/// as `tick_attack_timers`, except the component's presence *is* the
+/// signal (unlike `AttackTimer`, which stays present at `0.0` forever), so
+/// this removes it rather than just clamping.
+pub fn tick_recent_crit(
+    mut commands: Commands,
+    delta: Res<DeltaSeconds>,
+    mut query: Query<(Entity, &mut RecentCrit)>,
+) {
+    let dt = delta.0;
+    for (entity, mut recent_crit) in &mut query {
+        recent_crit.0 -= dt;
+        if recent_crit.0 <= 0.0 {
+            commands.entity(entity).remove::<RecentCrit>();
+        }
     }
 }
 
@@ -229,6 +290,16 @@ pub struct AttackerProgress<'a> {
 /// a hit actually resolves. The caller owns setting its own post-hit timing
 /// state (`timer.0 = melee.cooldown` or entering `Recovery`), which differs
 /// per model and so stays outside this function.
+///
+/// **M8.8: inserts `RecentCrit` on `target` unconditionally whenever
+/// `resolve_damage` reports a crit** — no `Player`/`Enemy` check here.
+/// MECHANICS.md's Combat feedback section excludes destructibles (M8.9)
+/// from this visual, but `combat.rs` can't depend on `enemy.rs`'s `Enemy`
+/// marker without creating an import cycle (`enemy.rs` already depends on
+/// `combat.rs`), and no destructible content exists yet to need excluding.
+/// The exclusion is enforced client-side instead, where `Player`/
+/// `RemotePlayer`/`Enemy` markers are all precisely available with no such
+/// constraint — see `client`'s `start_crit_flashes`.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_melee_hit(
     attacker: Entity,
@@ -246,6 +317,7 @@ pub fn resolve_melee_hit(
     healths: &mut Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     all_effects: &mut Query<&mut ActiveEffects>,
     runes: &RuneLibrary,
+    commands: &mut Commands,
     rng: &mut impl Rng,
 ) -> bool {
     let Ok((mut health, resistances, xp_reward)) = healths.get_mut(target) else {
@@ -294,14 +366,19 @@ pub fn resolve_melee_hit(
         .map(|stats| stats.bonus_damage_percent)
         .unwrap_or(0.0);
     let effective_base_damage = base_damage * (1.0 + level_damage_percent);
-    let amount = resolve_damage(
+    let damage = resolve_damage(
         effective_base_damage,
         damage_type,
         &effective_stats,
         &effective_resistances,
         rng,
     );
-    apply_damage(&mut health, amount);
+    apply_damage(&mut health, damage.amount);
+    if damage.is_crit {
+        commands
+            .entity(target)
+            .insert(RecentCrit(RECENT_CRIT_DURATION));
+    }
 
     if let Some(od) = attacker_progress.od.as_deref_mut() {
         od.gain(OD_GAIN_PER_HIT);
@@ -379,6 +456,7 @@ type AttackTargets<'w, 's> =
 // carries this exact allow for.
 #[allow(clippy::too_many_arguments)]
 pub fn attack_system(
+    mut commands: Commands,
     mut events: MessageReader<AttackRequested>,
     mut attackers: Attackers,
     targets: AttackTargets,
@@ -458,6 +536,7 @@ pub fn attack_system(
             &mut healths,
             &mut all_effects,
             &runes,
+            &mut commands,
             &mut rng,
         );
         if hit {
@@ -534,7 +613,8 @@ mod tests {
 
         let damage = resolve_damage(10.0, &primal(), &stats, &Resistances::default(), &mut rng);
 
-        assert_eq!(damage, 20.0);
+        assert_eq!(damage.amount, 20.0);
+        assert!(damage.is_crit);
     }
 
     #[test]
@@ -547,7 +627,8 @@ mod tests {
 
         let damage = resolve_damage(10.0, &primal(), &stats, &Resistances::default(), &mut rng);
 
-        assert_eq!(damage, 10.0);
+        assert_eq!(damage.amount, 10.0);
+        assert!(!damage.is_crit);
     }
 
     #[test]
@@ -562,7 +643,7 @@ mod tests {
 
         let damage = resolve_damage(10.0, &holy, &stats, &resistances, &mut rng);
 
-        assert_eq!(damage, 5.0);
+        assert_eq!(damage.amount, 5.0);
     }
 
     #[test]
@@ -577,7 +658,7 @@ mod tests {
 
         let damage = resolve_damage(10.0, &holy, &stats, &resistances, &mut rng);
 
-        assert_eq!(damage, 20.0);
+        assert_eq!(damage.amount, 20.0);
     }
 
     #[test]
@@ -729,6 +810,95 @@ mod tests {
         // unchanged); base damage 10.0 * (1.0 + bonus_damage_percent 1.0) =
         // 20.0 damage.
         assert_eq!(world.get::<Health>(target).unwrap().current, 80.0);
+    }
+
+    #[test]
+    fn attack_system_inserts_recent_crit_on_the_target_on_a_guaranteed_crit() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 1.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(100.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(
+            world.get::<RecentCrit>(target),
+            Some(&RecentCrit(RECENT_CRIT_DURATION))
+        );
+    }
+
+    #[test]
+    fn attack_system_does_not_insert_recent_crit_on_a_non_crit_hit() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(100.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        assert_eq!(world.get::<RecentCrit>(target), None);
     }
 
     #[test]
@@ -1438,5 +1608,72 @@ mod tests {
             &attacker_pos,
             MELEE_ARC_HALF_ANGLE_RADIANS
         ));
+    }
+
+    #[test]
+    fn tick_recent_crit_counts_down_without_removing_it_while_time_remains() {
+        let mut world = World::new();
+        world.init_resource::<DeltaSeconds>();
+        world.resource_mut::<DeltaSeconds>().0 = 0.1;
+        let entity = world.spawn(RecentCrit(RECENT_CRIT_DURATION)).id();
+
+        let _ = world.run_system_once(tick_recent_crit);
+
+        assert!(
+            (world.get::<RecentCrit>(entity).unwrap().0 - (RECENT_CRIT_DURATION - 0.1)).abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn tick_recent_crit_removes_it_once_expired() {
+        let mut world = World::new();
+        world.init_resource::<DeltaSeconds>();
+        world.resource_mut::<DeltaSeconds>().0 = RECENT_CRIT_DURATION + 1.0;
+        let entity = world.spawn(RecentCrit(RECENT_CRIT_DURATION)).id();
+
+        let _ = world.run_system_once(tick_recent_crit);
+
+        assert_eq!(world.get::<RecentCrit>(entity), None);
+    }
+
+    #[test]
+    fn is_critically_low_health_true_below_the_threshold() {
+        let health = Health {
+            current: 10.0,
+            max: 100.0,
+        };
+
+        assert!(is_critically_low_health(&health));
+    }
+
+    #[test]
+    fn is_critically_low_health_false_at_or_above_the_threshold() {
+        let health = Health {
+            current: 25.0,
+            max: 100.0,
+        };
+
+        assert!(!is_critically_low_health(&health));
+    }
+
+    #[test]
+    fn is_critically_low_health_true_at_zero_health() {
+        let health = Health {
+            current: 0.0,
+            max: 100.0,
+        };
+
+        assert!(is_critically_low_health(&health));
+    }
+
+    #[test]
+    fn is_critically_low_health_false_for_a_zero_max_health_entity() {
+        let health = Health {
+            current: 0.0,
+            max: 0.0,
+        };
+
+        assert!(!is_critically_low_health(&health));
     }
 }

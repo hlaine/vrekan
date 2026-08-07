@@ -33,11 +33,11 @@ use game_core::player::Player;
 // attributes like `AGE`/`LIFETIME`) into scope, and the two would otherwise
 // collide.
 use game_core::{
-    nearest_interactable_in_range, socketed_item_sell_value, xp_required,
+    is_critically_low_health, nearest_interactable_in_range, socketed_item_sell_value, xp_required,
     Attribute as PrimaryAttribute, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
     EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
-    KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints,
-    UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE, VENDOR_PANEL_ID,
+    KnownSkills, Level, Od, RecentCrit, RuneInventory, SkillCooldowns, Stats, Stunned,
+    UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE, VENDOR_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -185,6 +185,45 @@ const SPARK_SPAWN_RADIUS: f32 = 3.0;
 const SPARK_SPEED: f32 = 25.0;
 const SPARK_SIZE: f32 = 2.0;
 
+// M8.8 crit flash: `CritFlash`'s own client-local decay timer, deliberately
+// decoupled from `RecentCrit`'s server-side expiry (see `CritFlash`'s doc
+// comment) — a placeholder "rune glyph" burst shape (a one-shot radial
+// particle spray, same modifier set `build_torch_spark_effect` uses), not
+// real glyph art, matching this project's placeholder-first convention.
+const CRIT_FLASH_DURATION: f32 = 0.35;
+const CRIT_FLASH_PEAK_INTENSITY: f32 = 4.0;
+const CRIT_FLASH_LIGHT_COLOR: Color = Color::srgb(1.0, 0.95, 0.4);
+const CRIT_FLASH_LIGHT_INNER_RADIUS: f32 = 10.0;
+const CRIT_FLASH_LIGHT_OUTER_RADIUS: f32 = 60.0;
+const CRIT_FLARE_PARTICLE_COUNT: f32 = 24.0;
+const CRIT_FLARE_LIFETIME_SECS: f32 = 0.35;
+const CRIT_FLARE_SPAWN_RADIUS: f32 = 4.0;
+const CRIT_FLARE_SPEED: f32 = 60.0;
+const CRIT_FLARE_SIZE: f32 = 4.0;
+
+// M8.8 critically-low-health bleeding: a continuous dark-red mist trickle
+// (same continuous-rate shape as `build_torch_spark_effect`) plus a pulsing
+// gizmo ring, both gated on `game_core::is_critically_low_health`.
+const BLEED_MIST_SPAWN_RATE: f32 = 6.0;
+const BLEED_MIST_LIFETIME_SECS: f32 = 0.8;
+const BLEED_MIST_CAPACITY: u32 = 32;
+const BLEED_MIST_SPAWN_RADIUS: f32 = 6.0;
+const BLEED_MIST_SPEED: f32 = 10.0;
+const BLEED_MIST_SIZE: f32 = 5.0;
+const BLEED_RING_COLOR: Color = Color::srgb(0.6, 0.0, 0.0);
+const BLEED_RING_PULSE_SPEED: f32 = 4.0;
+const BLEED_RING_MIN_ALPHA: f32 = 0.25;
+const BLEED_RING_MAX_ALPHA: f32 = 0.75;
+
+// M8.8 player-taken-damage flash: a full-screen translucent overlay, faded
+// in immediately then decaying back to transparent — detected as a
+// client-side diff against the local player's previous `Health.current`
+// rather than a replicated event (MECHANICS.md: "no new replication
+// needed" for this bullet).
+const DAMAGE_FLASH_DURATION: f32 = 0.25;
+const DAMAGE_FLASH_PEAK_ALPHA: f32 = 0.35;
+const DAMAGE_FLASH_COLOR: (u8, u8, u8) = (180, 0, 0);
+
 // This client's persistent character identity, generated once and reused
 // across runs — not tied to any account system (see DECISIONS.md's
 // identity-model entry). Relative to CWD, matching the project's existing
@@ -257,6 +296,59 @@ struct VendorTemplates(Vec<(String, VendorTemplate)>);
 /// than each building its own copy of the same effect.
 #[derive(Resource, Clone)]
 struct TorchSparkEffect(Handle<EffectAsset>);
+
+/// Handle to the shared one-shot crit-flare `EffectAsset` (M8.8) — built
+/// once in `setup_scene`, mirroring `TorchSparkEffect`.
+#[derive(Resource, Clone)]
+struct CritFlareEffect(Handle<EffectAsset>);
+
+/// Handle to the shared continuous blood-mist `EffectAsset` (M8.8) — built
+/// once in `setup_scene`, mirroring `TorchSparkEffect`.
+#[derive(Resource, Clone)]
+struct BleedMistEffect(Handle<EffectAsset>);
+
+/// Client-local countdown driving the crit flash's `PointLight2d`
+/// intensity-spike-then-decay — inserted alongside `PointLight2d`/
+/// `ParticleEffect` by `start_crit_flashes`, ticked and the trio removed by
+/// `tick_crit_flashes`. Deliberately **not** tied to `RecentCrit`'s own
+/// server-side expiry: this is a purely visual overlay with no gameplay
+/// stakes, so a slight drift between the two timers doesn't matter, and
+/// decoupling avoids this system needing to watch for `RecentCrit`'s
+/// removal at all.
+#[derive(Component, Debug, Clone, Copy)]
+struct CritFlash {
+    remaining: f32,
+}
+
+/// Client-local marker for "currently showing the M8.8 low-health bleed
+/// particle mist" — tracks state so the continuous `ParticleEffect` is
+/// spawned once on crossing below `CRITICALLY_LOW_HEALTH_THRESHOLD` and
+/// removed once crossing back above it (or implicitly, on despawn/death).
+/// The pulsing gizmo ring needs no such bookkeeping — see `bleeding_system`.
+#[derive(Component, Debug, Clone, Copy)]
+struct Bleeding;
+
+/// Remaining seconds on the local player's damage-taken screen flash — see
+/// `detect_local_player_damage`/`damage_flash_overlay_system`.
+#[derive(Resource, Default)]
+struct DamageFlash {
+    remaining: f32,
+}
+
+/// The local player's `Health.current` as of the previous frame, so
+/// `detect_local_player_damage` can tell a decrease (damage taken) from an
+/// increase (healed) or no change — `None` until the local player's
+/// `Health` has been read at least once.
+#[derive(Resource, Default)]
+struct PreviousLocalPlayerHealth(Option<f32>);
+
+/// Query filter for the M8.8 crit-flash/bleeding combat-feedback visuals:
+/// any player (local or remote) or enemy. No `Destructible` marker exists
+/// yet (M8.9), so there's nothing to exclude in practice today — this is
+/// where that exclusion goes once one does. See `combat::resolve_melee_hit`'s
+/// doc comment for why the equivalent server-side exclusion isn't enforced
+/// there instead.
+type CombatFeedbackTargets = Or<(With<Player>, With<RemotePlayer>, With<Enemy>)>;
 
 /// Which panel(s) `interaction_trigger_system` has opened. Unlike M8's
 /// original single-panel design, one `Interactable` can declare more than
@@ -334,6 +426,8 @@ fn main() {
         .init_resource::<CharacterPanelOpen>()
         .init_resource::<InteractionPanels>()
         .init_resource::<PendingSell>()
+        .init_resource::<DamageFlash>()
+        .init_resource::<PreviousLocalPlayerHealth>()
         .add_systems(Startup, (setup_scene, connect_to_server))
         .add_systems(
             Update,
@@ -350,6 +444,11 @@ fn main() {
                 party_camera_system,
                 status_indicator_system,
                 facing_indicator_system,
+                start_crit_flashes,
+                tick_crit_flashes,
+                bleeding_system,
+                detect_local_player_damage,
+                tick_damage_flash,
             )
                 .chain(),
         )
@@ -365,6 +464,7 @@ fn main() {
         .add_systems(
             EguiPrimaryContextPass,
             (
+                damage_flash_overlay_system,
                 hud_system,
                 party_status_system,
                 minimap_system,
@@ -433,6 +533,8 @@ fn setup_scene(
     ));
 
     commands.insert_resource(TorchSparkEffect(build_torch_spark_effect(&mut effects)));
+    commands.insert_resource(CritFlareEffect(build_crit_flare_effect(&mut effects)));
+    commands.insert_resource(BleedMistEffect(build_bleed_mist_effect(&mut effects)));
 
     commands.spawn((
         TiledMap(asset_server.load(MAP_PATH)),
@@ -726,6 +828,98 @@ fn build_torch_spark_effect(effects: &mut Assets<EffectAsset>) -> Handle<EffectA
     )
 }
 
+/// Builds the shared one-shot crit-flare `EffectAsset` (M8.8) every crit
+/// flash attaches: a single radial burst of small gold particles, same
+/// `SpawnerSettings::once` shape `bevy_hanabi` 0.19.0 provides for exactly
+/// this case — fired once on `ParticleEffect` insertion (`start_crit_flashes`),
+/// not re-triggerable, which is fine since a fresh `ParticleEffect` is
+/// attached per crit rather than one long-lived effect reused across
+/// crits. A placeholder burst, not literal "rune glyph" art — see the
+/// crit-flash constants' doc comment.
+fn build_crit_flare_effect(effects: &mut Assets<EffectAsset>) -> Handle<EffectAsset> {
+    let mut color_gradient = bevy_hanabi::Gradient::new();
+    color_gradient.add_key(0.0, Vec4::new(1.0, 0.95, 0.5, 1.0));
+    color_gradient.add_key(1.0, Vec4::new(1.0, 0.8, 0.2, 0.0));
+
+    let writer = ExprWriter::new();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let init_lifetime = SetAttributeModifier::new(
+        Attribute::LIFETIME,
+        writer.lit(CRIT_FLARE_LIFETIME_SECS).expr(),
+    );
+    let init_pos = SetPositionCircleModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        radius: writer.lit(CRIT_FLARE_SPAWN_RADIUS).expr(),
+        dimension: ShapeDimension::Surface,
+    };
+    let init_vel = SetVelocityCircleModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        speed: writer.lit(CRIT_FLARE_SPEED).expr(),
+    };
+    let module = writer.finish();
+
+    let spawner = SpawnerSettings::once(CRIT_FLARE_PARTICLE_COUNT.into());
+    effects.add(
+        EffectAsset::new(CRIT_FLARE_PARTICLE_COUNT as u32, spawner, module)
+            .with_name("crit_flare")
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
+            .init(init_lifetime)
+            .render(SizeOverLifetimeModifier {
+                gradient: bevy_hanabi::Gradient::constant(Vec3::splat(CRIT_FLARE_SIZE)),
+                screen_space_size: false,
+            })
+            .render(ColorOverLifetimeModifier::new(color_gradient)),
+    )
+}
+
+/// Builds the shared continuous blood-mist `EffectAsset` (M8.8) every
+/// bleeding entity attaches — same continuous-rate shape as
+/// `build_torch_spark_effect`, dark red instead of orange/gold. A
+/// placeholder "mist" look (radial drift), not final art.
+fn build_bleed_mist_effect(effects: &mut Assets<EffectAsset>) -> Handle<EffectAsset> {
+    let mut color_gradient = bevy_hanabi::Gradient::new();
+    color_gradient.add_key(0.0, Vec4::new(0.6, 0.0, 0.0, 0.8));
+    color_gradient.add_key(1.0, Vec4::new(0.3, 0.0, 0.0, 0.0));
+
+    let writer = ExprWriter::new();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let init_lifetime = SetAttributeModifier::new(
+        Attribute::LIFETIME,
+        writer.lit(BLEED_MIST_LIFETIME_SECS).expr(),
+    );
+    let init_pos = SetPositionCircleModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        radius: writer.lit(BLEED_MIST_SPAWN_RADIUS).expr(),
+        dimension: ShapeDimension::Surface,
+    };
+    let init_vel = SetVelocityCircleModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        axis: writer.lit(Vec3::Z).expr(),
+        speed: writer.lit(BLEED_MIST_SPEED).expr(),
+    };
+    let module = writer.finish();
+
+    let spawner = SpawnerSettings::rate(BLEED_MIST_SPAWN_RATE.into());
+    effects.add(
+        EffectAsset::new(BLEED_MIST_CAPACITY, spawner, module)
+            .with_name("bleed_mist")
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
+            .init(init_lifetime)
+            .render(SizeOverLifetimeModifier {
+                gradient: bevy_hanabi::Gradient::constant(Vec3::splat(BLEED_MIST_SIZE)),
+                screen_space_size: false,
+            })
+            .render(ColorOverLifetimeModifier::new(color_gradient)),
+    )
+}
+
 fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
     delta.0 = time.delta_secs();
 }
@@ -953,6 +1147,171 @@ fn facing_indicator_system(query: Query<(&Position, &Facing)>, mut gizmos: Gizmo
         let end = start + Vec2::new(facing.x, facing.y) * FACING_ARROW_LENGTH;
         gizmos.arrow_2d(start, end, FACING_ARROW_COLOR);
     }
+}
+
+/// Reacts to a newly-replicated `RecentCrit` (server-inserted the instant a
+/// hit crits — see `game_core::combat::resolve_melee_hit`) by starting the
+/// M8.8 light/particle flourish: `CritFlash` (the decay timer),
+/// `PointLight2d`, and a one-shot `ParticleEffect`, all attached directly
+/// to the target entity so they follow its `Transform` automatically —
+/// same pattern `spawn_torch_lights` uses for a static torch, just on a
+/// moving entity instead. Gated to `CombatFeedbackTargets` — see that
+/// type's doc comment for why the exclusion lives here and not
+/// server-side.
+fn start_crit_flashes(
+    mut commands: Commands,
+    flare_effect: Res<CritFlareEffect>,
+    new_crits: Query<Entity, (Added<RecentCrit>, CombatFeedbackTargets)>,
+) {
+    for entity in &new_crits {
+        commands.entity(entity).insert((
+            CritFlash {
+                remaining: CRIT_FLASH_DURATION,
+            },
+            PointLight2d {
+                color: CRIT_FLASH_LIGHT_COLOR,
+                intensity: CRIT_FLASH_PEAK_INTENSITY,
+                inner_radius: CRIT_FLASH_LIGHT_INNER_RADIUS,
+                outer_radius: CRIT_FLASH_LIGHT_OUTER_RADIUS,
+                falloff: 3.0,
+                cast_shadows: false,
+            },
+            ParticleEffect::new(flare_effect.0.clone()),
+        ));
+    }
+}
+
+/// Decays `CritFlash`'s `PointLight2d` intensity linearly to zero over its
+/// remaining duration (the "spike then decay" shape — full intensity from
+/// the instant it starts), removing the light/particle/timer trio once it
+/// expires. Runs on its own timer rather than reacting to `RecentCrit`'s
+/// removal — see `CritFlash`'s doc comment.
+fn tick_crit_flashes(
+    mut commands: Commands,
+    delta: Res<DeltaSeconds>,
+    mut query: Query<(Entity, &mut CritFlash, &mut PointLight2d)>,
+) {
+    let dt = delta.0;
+    for (entity, mut flash, mut light) in &mut query {
+        flash.remaining -= dt;
+        if flash.remaining <= 0.0 {
+            commands
+                .entity(entity)
+                .remove::<CritFlash>()
+                .remove::<PointLight2d>()
+                .remove::<ParticleEffect>();
+            continue;
+        }
+        let fraction = (flash.remaining / CRIT_FLASH_DURATION).clamp(0.0, 1.0);
+        light.intensity = CRIT_FLASH_PEAK_INTENSITY * fraction;
+    }
+}
+
+type BleedingTargets<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static Position, &'static Health, Has<Bleeding>),
+    CombatFeedbackTargets,
+>;
+
+/// M8.8 critically-low-health bleeding: purely a client-side check on
+/// replicated `Health` via `game_core::is_critically_low_health`, no new
+/// replication needed. Toggles the continuous blood-mist `ParticleEffect`
+/// (via the `Bleeding` marker, so it's only inserted/removed on an actual
+/// threshold crossing, not every frame) and draws a pulsing dark-red gizmo
+/// ring — the ring needs no such bookkeeping, it's redrawn from scratch
+/// every frame straight off `Health`, same immediate-mode pattern
+/// `status_indicator_system` uses for its own status rings. "Handles death
+/// cleanly" for free: a despawned entity takes `Bleeding`/`ParticleEffect`
+/// with it, and a dead-but-not-despawned `Downed` player (health at or near
+/// zero) simply keeps showing the visual, which reads as "still critically
+/// wounded" rather than as a bug.
+fn bleeding_system(
+    mut commands: Commands,
+    mist_effect: Res<BleedMistEffect>,
+    query: BleedingTargets,
+    time: Res<Time>,
+    mut gizmos: Gizmos,
+) {
+    for (entity, position, health, already_bleeding) in &query {
+        if !is_critically_low_health(health) {
+            if already_bleeding {
+                commands
+                    .entity(entity)
+                    .remove::<Bleeding>()
+                    .remove::<ParticleEffect>();
+            }
+            continue;
+        }
+        if !already_bleeding {
+            commands
+                .entity(entity)
+                .insert((Bleeding, ParticleEffect::new(mist_effect.0.clone())));
+        }
+        let pulse = (time.elapsed_secs() * BLEED_RING_PULSE_SPEED).sin() * 0.5 + 0.5;
+        let alpha = BLEED_RING_MIN_ALPHA + (BLEED_RING_MAX_ALPHA - BLEED_RING_MIN_ALPHA) * pulse;
+        gizmos.circle_2d(
+            Vec2::new(position.x, position.y),
+            STATUS_RING_RADIUS,
+            BLEED_RING_COLOR.with_alpha(alpha),
+        );
+    }
+}
+
+/// Detects the local player's `Health.current` decreasing frame-to-frame
+/// (damage taken) by diffing against `PreviousLocalPlayerHealth` — there's
+/// no replicated "you got hit" event to react to instead, per MECHANICS.md's
+/// "no new replication needed" framing for this bullet. Resets
+/// `DamageFlash` to full on a decrease; an increase (healed) or no change
+/// does nothing. Clears `PreviousLocalPlayerHealth` when there's no local
+/// player yet, so a just-connected client's first health reading isn't
+/// misread as a decrease from a stale previous value.
+fn detect_local_player_damage(
+    local_player: Res<LocalPlayer>,
+    healths: Query<&Health>,
+    mut previous: ResMut<PreviousLocalPlayerHealth>,
+    mut flash: ResMut<DamageFlash>,
+) {
+    let Some(entity) = local_player.0 else {
+        previous.0 = None;
+        return;
+    };
+    let Ok(health) = healths.get(entity) else {
+        return;
+    };
+    if let Some(previous_current) = previous.0 {
+        if health.current < previous_current {
+            flash.remaining = DAMAGE_FLASH_DURATION;
+        }
+    }
+    previous.0 = Some(health.current);
+}
+
+fn tick_damage_flash(delta: Res<DeltaSeconds>, mut flash: ResMut<DamageFlash>) {
+    flash.remaining = (flash.remaining - delta.0).max(0.0);
+}
+
+/// Paints a full-screen translucent red rect, alpha decaying linearly from
+/// `DAMAGE_FLASH_PEAK_ALPHA` to zero over `DamageFlash.remaining` — cheap,
+/// high feedback value, entirely client-side (MECHANICS.md's Combat
+/// feedback framing). Drawn on egui's background layer via `layer_painter`
+/// rather than a `Window`/`Area`, since this has no widgets and shouldn't
+/// intercept input.
+fn damage_flash_overlay_system(mut contexts: EguiContexts, flash: Res<DamageFlash>) {
+    if flash.remaining <= 0.0 {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let fraction = flash.remaining / DAMAGE_FLASH_DURATION;
+    let alpha = (DAMAGE_FLASH_PEAK_ALPHA * fraction * 255.0) as u8;
+    let (r, g, b) = DAMAGE_FLASH_COLOR;
+    ctx.layer_painter(egui::LayerId::background()).rect_filled(
+        ctx.viewport_rect(),
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
+    );
 }
 
 /// `Od`/`SkillCooldowns` are `Option` for the same reason as elsewhere —

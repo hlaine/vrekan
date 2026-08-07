@@ -1524,3 +1524,74 @@ as every other constant of this kind in the codebase — this playtest didn't
 specifically exercise spending points into each attribute one at a time, so
 treat the numbers as still unverified in practice, not just untuned.
 Intelligence remains fully inert until M8.10-12's rune system, as designed.
+
+## M8.8: combat feedback — RecentCrit gated client-side to dodge an import
+## cycle, and a skill-cast crit-flash gap flagged rather than absorbed
+
+**Context.** `MECHANICS.md`'s Combat feedback section and `ROADMAP.md`'s
+M8.8 bullets already specified almost the entire shape (a `RecentCrit`
+marker driving a light/particle flourish, a pure `Health`-ratio threshold
+for bleeding, both excluding destructibles, a damage-taken screen flash) —
+see `ROADMAP.md`'s M8.8 section for the full implementation writeup. Before
+building, the user confirmed the one `protocol`-crate touch this milestone
+needed (`RecentCrit` replication, `PROTOCOL_ID` 2→3), which `ROADMAP.md`'s
+own bullet text had already pre-flagged as needing `CLAUDE.md` sign-off.
+Unlike M8.7's protocol touch, this one doesn't break the local save —
+ephemeral combat markers (`Stunned`/`Downed`) were never part of
+`CharacterSave`, and `RecentCrit` follows the same pattern.
+
+**A real architecture constraint found during implementation, not
+guessed around: `combat.rs` cannot depend on `enemy.rs`'s `Enemy`
+marker.** `MECHANICS.md` says the crit-flash/bleeding visuals should
+exclude destructibles, i.e. apply only to `Player`-or-`Enemy`-marked
+entities. The natural place to enforce that felt like inside
+`combat::resolve_melee_hit` (server-side, where `RecentCrit` gets
+inserted) — but `enemy.rs` already imports from `combat.rs`
+(`AttackRequested`, `MeleeAttack`), so `combat.rs` importing `Enemy` back
+would create a cycle. Two things resolved this cleanly rather than forcing
+an awkward workaround:
+1. **No destructible content exists yet** (M8.9 hasn't landed), so there's
+   nothing to actually exclude right now — gating on "has `Health`" and
+   gating on "is `Player` or `Enemy`" are equivalent today. Inventing a
+   marker or filter shape for content that doesn't exist yet would be
+   guessing at M8.9's still-undecided destructible schema (does a
+   destructible keep the `Enemy` marker, since `MECHANICS.md` says it's
+   "an enemy template stripped down"? Genuinely unknown until M8.9 designs
+   it) — exactly the "don't design for hypothetical future requirements"
+   trap `CLAUDE.md` warns against.
+2. **The client can already do this precisely, with no cycle risk at
+   all.** `client` depends on `game_core` one-directionally, so it can
+   freely filter on `Or<(With<Player>, With<RemotePlayer>, With<Enemy>)>`
+   (`CombatFeedbackTargets`). Since the *visual* is what needs excluding
+   (nothing server-side cares whether a crate flashes), pushing the
+   exclusion entirely to the client's rendering systems means
+   `resolve_melee_hit` can insert `RecentCrit` unconditionally on any
+   crit, with no target-type awareness at all — simpler, no cycle, and
+   whatever M8.9 eventually decides destructibles look like, only the
+   client's filter needs revisiting, not this server-side insert.
+
+**A visible inconsistency flagged rather than silently shipped: skill-cast
+crits don't flare.** `resolve_damage`'s signature change (returning
+whether the hit crit, not just the amount) is shared by both
+`combat::resolve_melee_hit` (melee) and `skill::resolve_hit`
+(power_strike/aoe_burst), so `skill.rs` needed a mechanical update
+regardless. `ROADMAP.md`'s M8.8 wording only asked for the melee path to
+insert `RecentCrit`, and wiring the skill path too would mean threading
+`Commands` through a second call site for something outside this pass's
+stated scope. Landing a power_strike crit today deals bonus damage with no
+flare, while a melee crit does — a real, player-visible gap, documented in
+`ROADMAP.md`'s M8.8 section rather than fixed silently or left
+undocumented, so it reads as a known follow-up, not a bug nobody noticed.
+
+**Consequences / what's still open:** code-complete, full verification loop
+clean, and **confirmed live** — server restarted on the new build, client
+reconnected, user confirmed combat still feels good and the new crit-flash/
+bleeding visuals work. Not yet committed. The crit-flash/bleeding/damage-
+flash tuning constants (`CRIT_FLASH_DURATION`, `CRITICALLY_LOW_HEALTH_
+THRESHOLD`, `DAMAGE_FLASH_DURATION` and siblings) are first-guess
+placeholders, same tune-by-feel framing as always — this playtest confirmed
+they're in a reasonable ballpark, not that they're final. Boss health bar
+stays deferred to M9 as `ROADMAP.md` already specified. The skill-cast
+crit-flash gap above is the one concrete follow-up worth picking up
+alongside or before M9, once it's clear whether skills stay a fully
+separate resolution path from melee long-term or eventually get unified.

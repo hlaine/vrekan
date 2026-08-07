@@ -5,14 +5,15 @@ use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
     AttackTimer, Attribute, Attributes, Currency, Downed, Enemy, EnemyKind, EquipSlot, Equipment,
     Facing, Health, Interactable, Inventory, ItemDrop, KnownSkills, Level, Od, Position,
-    RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints,
+    RecentCrit, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints,
+    UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
 /// shapes) so incompatible client/server builds refuse to connect instead of
 /// silently desyncing.
-pub const PROTOCOL_ID: u64 = 2;
+pub const PROTOCOL_ID: u64 = 3;
 
 pub const SERVER_PORT: u16 = 5000;
 
@@ -246,6 +247,7 @@ impl Plugin for NetworkPlugin {
             .replicate::<UnspentSkillPoints>()
             .replicate::<Interactable>()
             .replicate::<Currency>()
+            .replicate::<RecentCrit>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable)

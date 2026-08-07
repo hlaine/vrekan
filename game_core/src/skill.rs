@@ -349,6 +349,13 @@ fn targets_in_radius(
 /// resistance exactly like `combat::attack_system`, rolls each of
 /// `effects` independently against its own `chance`, and grants the
 /// killing blow's `XpReward` to the caster if they have `Level`.
+///
+/// **Doesn't insert `RecentCrit` on a crit, unlike `combat::
+/// resolve_melee_hit`** — M8.8 scoped the crit-flash feedback to melee
+/// (`ROADMAP.md`'s M8.8 section), so a skill-cast crit doesn't flare yet. A
+/// known, flagged gap (see `DECISIONS.md`'s M8.8 entry), not an oversight:
+/// extending it here would mean threading `Commands` through this
+/// function and its two call sites for a case nothing asked for this pass.
 #[allow(clippy::too_many_arguments)] // mirrors combat::attack_system's inherent per-hit resolution shape
 fn resolve_hit(
     caster: Entity,
@@ -369,8 +376,8 @@ fn resolve_hit(
     };
     let no_resistances = Resistances::default();
     let resistances = resistances.unwrap_or(&no_resistances);
-    let amount = resolve_damage(damage, damage_type, caster_stats, resistances, rng);
-    apply_damage(&mut health, amount);
+    let damage = resolve_damage(damage, damage_type, caster_stats, resistances, rng);
+    apply_damage(&mut health, damage.amount);
 
     if let Ok([mut caster_effects, mut target_effects]) = all_effects.get_many_mut([caster, target])
     {

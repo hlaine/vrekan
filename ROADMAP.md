@@ -944,36 +944,87 @@ Client-only presentation except one small replicated marker for crits — no
 `game_core` combat-*resolution* changes beyond exposing crit info and
 emitting that marker.
 
-- [ ] `resolve_damage` (M4, already shipped and tested) changes its return
+**Implementation status: everything below is built, unit-tested, passes the
+full verification loop (build/test/clippy/fmt), and confirmed live** —
+server restarted on the new build, client reconnected (existing save still
+loaded fine — this milestone didn't touch `CharacterSave`), user confirmed
+both combat feel and the new visuals (crit flash, bleeding) working.
+Confirmed with the user before touching `protocol` (new `RecentCrit`
+component + `PROTOCOL_ID` 2→3 — no save-file impact, ephemeral combat
+markers like `Stunned`/`Downed` were never persisted). **Not yet
+committed.**
+
+- [x] `resolve_damage` (M4, already shipped and tested) changes its return
   shape to also report whether the hit crit, not just the damage amount —
-  a real change to already-tested code; update its existing unit tests
-  alongside the new ones.
-- [ ] `RecentCrit` marker component (short-lived, ~0.3-0.5s), inserted on
-  the target in `attack_system` when a hit crits, replicated like
-  `Downed`/`Stunned` — new `protocol` surface, flagged per `CLAUDE.md`.
-- [ ] Crit visual: `bevy_lit` intensity-spike-then-decay `PointLight2d`
-  burst + a one-shot `bevy_hanabi` rune-glyph particle flare at the
-  target, triggered off `RecentCrit`'s presence — reuses M8.5's torch
-  light/particle pattern, no new systems architecture.
-- [ ] Critically-low-health bleeding: purely client-side threshold check
-  on replicated `Health` (current/max), no new replication needed. Below
-  a tuning-data threshold, a continuous `bevy_hanabi` blood-mist trickle
-  plus a faint pulsing dark-red gizmo ring (reusing
-  `status_indicator_system`'s existing pattern) persists until death. No
-  indicator above threshold.
-- [ ] **Both of the above are explicitly gated to `Player`-or-enemy-marked
-  entities, excluding destructibles** (M8.9) — a crate breaking shouldn't
-  visually bleed or crit-flash.
-- [ ] Player-taken-damage flash/vignette on the local player's own hit —
-  cheap, high feedback value, entirely client-side off the player's own
-  replicated `Health` decreasing.
-- [ ] Boss health bar: explicitly **out of scope here**, deferred to M9
-  alongside the first real boss — nothing to build it against yet. Keep
-  the crit/bleeding systems entity-agnostic (not hardcoded to "regular
-  enemy") so a boss gets both for free once M9 lands, even before its
-  dedicated top-of-screen bar exists.
-- [ ] Tests: threshold-crossing logic (bleeding starts/stops at the right
-  percentage, handles death cleanly), `RecentCrit` insert/expiry timing.
+  now returns a `DamageResult { amount, is_crit }` instead of a bare `f32`.
+  A real change to already-tested code; all four of its existing unit
+  tests updated (`.amount`/`.is_crit`) alongside two new ones.
+- [x] `RecentCrit(f32)` marker component (holds its own remaining seconds,
+  `RECENT_CRIT_DURATION = 0.4`, within the 0.3-0.5s range) — replicated
+  like `Downed`/`Stunned`, ticked down and removed by a new
+  `combat::tick_recent_crit` system (mirrors `tick_attack_timers`'s shape,
+  but removes the component at zero rather than clamping, since
+  `RecentCrit`'s presence *is* the signal). Inserted from
+  `combat::resolve_melee_hit` — the shared hit-resolution helper both
+  `attack_system` (enemies) and `weapon_attack::tick_player_attack_phases`
+  (players) call — not duplicated into each caller, so a player-dealt crit
+  flares exactly like an enemy-dealt one. Both call sites, plus
+  `resolve_melee_hit` itself, gained a `Commands` parameter to make the
+  insert possible.
+- [x] Crit visual: `bevy_lit` intensity-spike-then-decay `PointLight2d`
+  burst + a one-shot `bevy_hanabi` particle flare at the target
+  (`start_crit_flashes` reacts to `Added<RecentCrit>`; `tick_crit_flashes`
+  decays the light and removes the trio), attached directly to the target
+  entity so it follows `Transform` automatically — reuses M8.5's torch
+  light/particle pattern (`build_crit_flare_effect` mirrors
+  `build_torch_spark_effect`, `SpawnerSettings::once` instead of `rate`).
+  A placeholder radial-burst shape, not literal "rune glyph" art.
+- [x] Critically-low-health bleeding: purely client-side threshold check
+  on replicated `Health` via a new `combat::is_critically_low_health` pure
+  function (`CRITICALLY_LOW_HEALTH_THRESHOLD = 0.25`) — no new replication.
+  Below the threshold, a continuous `bevy_hanabi` blood-mist trickle
+  (`bleeding_system`, gated by a client-local `Bleeding` marker so the
+  particle effect is only inserted/removed on an actual crossing) plus a
+  pulsing dark-red gizmo ring (immediate-mode, reusing
+  `status_indicator_system`'s pattern — no bookkeeping needed) persists
+  until the ratio rises back above threshold or the entity despawns.
+- [x] **Both of the above are gated to a `CombatFeedbackTargets` query
+  filter** (`Or<(With<Player>, With<RemotePlayer>, With<Enemy>)>`) — a
+  crate breaking shouldn't visually bleed or crit-flash. **Enforced
+  client-side, not server-side**: `combat.rs` can't depend on `enemy.rs`'s
+  `Enemy` marker without an import cycle (`enemy.rs` already depends on
+  `combat.rs`), so `resolve_melee_hit` inserts `RecentCrit` unconditionally
+  on any crit, and the client's precise type filter does the excluding —
+  see `DECISIONS.md`'s M8.8 entry. No destructible content exists yet
+  (M8.9) to actually need excluding either way.
+- [x] Player-taken-damage flash/vignette: a full-screen translucent red
+  `egui` overlay (`damage_flash_overlay_system`, painted on the background
+  layer so it doesn't intercept input), triggered by
+  `detect_local_player_damage` diffing the local player's `Health.current`
+  frame-to-frame (no replicated "you got hit" event exists or was added)
+  and decayed by `tick_damage_flash`. Cheap, high feedback value, entirely
+  client-side.
+- [ ] Boss health bar: still explicitly **out of scope here**, deferred to
+  M9. The crit/bleeding systems are entity-agnostic (`CombatFeedbackTargets`
+  covers any `Enemy`, not a specific kind), so a boss gets both for free
+  once M9 lands, even before its dedicated top-of-screen bar exists.
+- [x] Tests: `game_core` gained threshold-crossing tests
+  (`is_critically_low_health` at various ratios including zero-health and
+  zero-max-health edge cases) and `RecentCrit` insert/expiry timing
+  (`attack_system` inserting/not-inserting it on crit vs. non-crit,
+  `tick_recent_crit` counting down and removing at expiry). Bleeding's
+  actual visual system lives in `client`, which has no existing unit-test
+  convention (nothing else there does), so the pure threshold decision it
+  calls is what's tested, in `game_core` where it lives.
+
+**Known gap, flagged not silently dropped: skill-cast crits don't flare.**
+`skill::resolve_hit` (power_strike/aoe_burst's damage application) shares
+`resolve_damage` and so needed the same signature adaptation, but wasn't
+wired to insert `RecentCrit` — that would mean threading `Commands` through
+a second call path for a case `ROADMAP.md`'s own wording didn't ask for
+this pass. A spell crit not flaring while a melee crit does is a real,
+visible inconsistency worth fixing later, not a design decision — see
+`DECISIONS.md`'s M8.8 entry.
 
 ## M8.9 — Dynamic objects: destructibles & movable puzzle objects
 

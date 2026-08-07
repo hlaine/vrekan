@@ -335,6 +335,7 @@ type TickingPlayers<'w, 's> = Query<
 // idiomatic shape here, not a sign this needs bundling into a struct.
 #[allow(clippy::too_many_arguments)]
 pub fn tick_player_attack_phases(
+    mut commands: Commands,
     delta: Res<DeltaSeconds>,
     mut players: TickingPlayers,
     targets_equipment: Query<&Equipment>,
@@ -397,6 +398,7 @@ pub fn tick_player_attack_phases(
             &mut healths,
             &mut all_effects,
             &runes,
+            &mut commands,
             &mut rng,
         );
         tracing::debug!(?entity, hit, damage = weapon.damage, "hit resolved");

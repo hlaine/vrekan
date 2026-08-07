@@ -25,7 +25,8 @@ use content::{
     load_all_rune_templates, load_all_skill_templates, load_all_vendor_templates, spawn_enemy,
 };
 use game_core::combat::{
-    attack_system, death_system, tick_attack_timers, AttackRequested, CombatStats, Health,
+    attack_system, death_system, tick_attack_timers, tick_recent_crit, AttackRequested,
+    CombatStats, Health,
 };
 use game_core::enemy::ai_system;
 use game_core::movement::leash_system;
@@ -184,6 +185,7 @@ fn main() {
                 (
                     sync_enemy_velocity_to_physics,
                     tick_attack_timers,
+                    tick_recent_crit,
                     tick_od_regen,
                     tick_skill_cooldowns,
                     start_player_windups,
