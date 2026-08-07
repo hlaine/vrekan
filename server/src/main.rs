@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime};
 
 use avian2d::math::Vector;
 use avian2d::prelude::{
-    Collider, Friction, Gravity, LinearVelocity, LockedAxes, PhysicsPlugins,
-    Position as PhysicsPosition, RigidBody,
+    Collider, ColliderDensity, ColliderDisabled, Friction, Gravity, LinearDamping, LinearVelocity,
+    LockedAxes, PhysicsPlugins, Position as PhysicsPosition, RigidBody,
 };
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
@@ -21,8 +21,9 @@ use bevy_replicon_renet::{
     RenetChannelsExt, RenetServer, RepliconRenetPlugins,
 };
 use content::{
-    load_all_enemy_templates, load_all_interactable_templates, load_all_item_templates,
-    load_all_rune_templates, load_all_skill_templates, load_all_vendor_templates, spawn_enemy,
+    load_all_destructible_templates, load_all_enemy_templates, load_all_interactable_templates,
+    load_all_item_templates, load_all_rune_templates, load_all_skill_templates,
+    load_all_vendor_templates, spawn_destructible, spawn_enemy,
 };
 use game_core::combat::{
     attack_system, death_system, tick_attack_timers, tick_recent_crit, AttackRequested,
@@ -34,13 +35,14 @@ use game_core::{
     allocate_stat_point, apply_death_xp_penalty, buy_item, equip_item, interact_or_pickup_system,
     learn_skill, nearest_interactable_with_panel, reset_xp_on_full_wipe, revive_system, sell_item,
     skill_cast_system, socket_rune, start_player_windups, tick_od_regen, tick_player_attack_phases,
-    tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, ActiveEffects,
-    AttackPhase, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy, Equipment, Facing,
-    InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory, Item, ItemDrop,
-    ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Resistances, Reviving,
-    RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, Stat, Stats,
-    Stunned, UnspentSkillPoints, UnspentStatPoints, Velocity, VendorLibrary, FORGING_PANEL_ID,
-    VENDOR_PANEL_ID,
+    tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, update_unlockables,
+    ActiveEffects, AttackPhase, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
+    Equipment, Facing, Gate, GateOpen, InteractOrPickupRequested, Interactable,
+    InteractableLibrary, Inventory, Item, ItemDrop, ItemLibrary, KnownSkills, Level, MoveSpeed, Od,
+    Player, Position, PushableObject, Resistances, Reviving, RuneInventory, RuneLibrary,
+    SkillCastRequested, SkillCooldowns, SkillLibrary, Stat, Stats, Stunned, UnlockCondition,
+    Unlockable, UnspentSkillPoints, UnspentStatPoints, Velocity, VendorLibrary, Zone,
+    FORGING_PANEL_ID, VENDOR_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -70,6 +72,7 @@ const ITEM_TEMPLATES_DIR: &str = "assets/items";
 const RUNE_TEMPLATES_DIR: &str = "assets/runes";
 const INTERACTABLE_TEMPLATES_DIR: &str = "assets/interactables";
 const VENDOR_TEMPLATES_DIR: &str = "assets/vendors";
+const DESTRUCTIBLE_TEMPLATES_DIR: &str = "assets/destructibles";
 // Enemies spawn in the map's bottom open field (rows 12-14, well clear of
 // the mountain band and the player's top-left spawn point) — see
 // assets/maps/valley.tmx and spawn_map_colliders' coordinate convention.
@@ -78,6 +81,15 @@ const ENEMY_SPAWN_BASE: Position = Position {
     y: -420.0,
 };
 const ENEMY_SPAWN_SPACING: f32 = 150.0;
+
+// M8.9 smoke-test puzzle object names — `spawn_pushables_and_gates` matches
+// against these fixed names in the map's "puzzle" object layer, rather than
+// a generic named-linking scheme (that's M9's job — see
+// `spawn_pushables_and_gates`'s doc comment). Not content-templated: a
+// single hardcoded size/appearance is enough to prove the mechanism.
+const PUSHABLE_OBJECT_SIZE: f32 = 28.0;
+const PUZZLE_ZONE_OBJECT_NAME: &str = "test_zone";
+const PUZZLE_GATE_OBJECT_NAME: &str = "test_gate";
 
 /// Save files live under `saves/<game_id>/` — see `persistence`. One server
 /// process is one game (see DECISIONS.md), so this is a directory
@@ -157,6 +169,8 @@ fn main() {
                 spawn_map_colliders,
                 spawn_enemies,
                 spawn_interactables,
+                spawn_destructibles,
+                spawn_pushables_and_gates,
                 spawn_starter_loot,
             ),
         )
@@ -201,6 +215,8 @@ fn main() {
                     apply_death_xp_penalty,
                     reset_xp_on_full_wipe,
                     revive_system,
+                    update_unlockables,
+                    sync_gate_collider,
                 )
                     .chain(),
                 (
@@ -873,6 +889,238 @@ fn spawn_interactables(mut commands: Commands) {
     }
 }
 
+/// Loads the map's "destructibles" object layer and spawns a
+/// `Destructible` per named point object, matching each name against a
+/// `content::DestructibleTemplate` key — same convention as `EnemyKind`/
+/// `Interactable`'s. A named object with no matching template panics here,
+/// at Startup before anyone's connected, same "malformed content fails
+/// loudly" convention as `spawn_enemies`/`spawn_interactables`.
+///
+/// **`RigidBody::Static`, not `Dynamic`**: unlike enemies/players, a
+/// destructible never moves, so it doesn't need to be part of
+/// `PhysicsBodies`'s ongoing position sync — its `PhysicsPosition` is set
+/// once here and never touched again, same as `spawn_map_colliders`'
+/// terrain colliders. It still needs an actual `Position`/`PhysicsPosition`
+/// pair (unlike those anonymous terrain colliders) since `Destructible`
+/// carries other replicated components that need somewhere to be.
+fn spawn_destructibles(mut commands: Commands) {
+    let templates = load_all_destructible_templates(Path::new(DESTRUCTIBLE_TEMPLATES_DIR))
+        .unwrap_or_else(|error| panic!("failed to load destructible templates: {error}"));
+
+    let mut loader = tiled::Loader::new();
+    let map = loader
+        .load_tmx_map(Path::new(MAP_PATH))
+        .unwrap_or_else(|error| panic!("failed to load map {MAP_PATH}: {error}"));
+
+    for layer in map.layers() {
+        if layer.name != "destructibles" {
+            continue;
+        }
+        let tiled::LayerType::Objects(object_layer) = layer.layer_type() else {
+            continue;
+        };
+        for object in object_layer.objects() {
+            let tiled::ObjectShape::Point(..) = &object.shape else {
+                continue;
+            };
+            let template_key = object.name.clone();
+            let Some((_, template)) = templates.iter().find(|(key, _)| *key == template_key) else {
+                panic!(
+                    "destructible object {template_key:?} in {MAP_PATH} has no matching \
+                     template in {DESTRUCTIBLE_TEMPLATES_DIR}"
+                );
+            };
+            let position = Position {
+                x: object.x,
+                y: -object.y,
+            };
+            let entity = spawn_destructible(&mut commands, template_key, template, position);
+            if template.movable {
+                let (density, damping) = pushable_physics(template.weight);
+                commands.entity(entity).insert((
+                    Replicated,
+                    PushableObject,
+                    RigidBody::Dynamic,
+                    Collider::circle(template.size / 2.0),
+                    LockedAxes::ROTATION_LOCKED,
+                    Friction::ZERO,
+                    density,
+                    damping,
+                    PhysicsPosition(Vector::new(position.x, position.y)),
+                    LinearVelocity::default(),
+                ));
+            } else {
+                commands.entity(entity).insert((
+                    Replicated,
+                    RigidBody::Static,
+                    Collider::circle(template.size / 2.0),
+                    PhysicsPosition(Vector::new(position.x, position.y)),
+                ));
+            }
+        }
+    }
+}
+
+/// How much a pushable body (`PushableObject` — both the M8.9 smoke-test
+/// block and any `movable: true` destructible) resists being pushed —
+/// shared by both spawn sites so a crate and the puzzle block feel
+/// consistent rather than independently tuned. Higher `weight` means more
+/// `ColliderDensity` (harder to accelerate under a fixed push force, feels
+/// heavier) and proportionally more `LinearDamping` (settles back to rest
+/// quicker once no longer pushed); lower `weight` is the opposite, still
+/// damped (never zero) but with more give.
+///
+/// **Why `LinearDamping` is here at all, not just density**: confirmed via
+/// a real live playtest, not assumed — unlike players/enemies, nothing
+/// ever re-drives a pushable object's `LinearVelocity` every tick (no
+/// input, no AI), so with `Friction::ZERO` and no damping, a single
+/// collision impulse from being touched left it drifting indefinitely
+/// (reported live: "the grey block started drifting away when touched").
+/// `PUSHABLE_BASE_DAMPING` reproduces the damping value that specific fix
+/// confirmed working, at `weight == 1.0`.
+const PUSHABLE_BASE_DAMPING: f32 = 6.0;
+
+fn pushable_physics(weight: f32) -> (ColliderDensity, LinearDamping) {
+    (
+        ColliderDensity(weight),
+        LinearDamping(PUSHABLE_BASE_DAMPING * weight),
+    )
+}
+
+/// Loads the map's "puzzle" object layer and wires up a single **smoke-test**
+/// pushable-block-into-zone-opens-gate instance, confirmed with the user as
+/// worth building even though `MECHANICS.md`'s Dynamic objects section
+/// explicitly scopes real puzzle *placement* to M9 ("this milestone builds
+/// the mechanical primitives only, no actual puzzle authored yet") — this
+/// is a mechanism smoke test, the same role M8.5's single test light/
+/// occluder played, not real dungeon puzzle design. A generic scheme for
+/// linking arbitrary named pushables/zones/gates together is exactly the
+/// kind of "puzzle placement is per-dungeon content" work M9 owns, so this
+/// function deliberately doesn't build one — it matches a single hardcoded
+/// point object (the pushable) plus two fixed-name rectangle objects
+/// (`PUZZLE_ZONE_OBJECT_NAME`/`PUZZLE_GATE_OBJECT_NAME`) and wires exactly
+/// those three together. Silently does nothing if the layer or any of the
+/// three objects is missing — this content is optional smoke-test
+/// scaffolding, not something a malformed-content panic should guard.
+///
+/// The gate starts blocking (no `ColliderDisabled`) — `Unlockable` with no
+/// `GateOpen` yet is the closed state everywhere else in this milestone,
+/// and `sync_gate_collider` is what actually toggles the collider once
+/// `update_unlockables` decides the condition is met.
+fn spawn_pushables_and_gates(mut commands: Commands) {
+    let mut loader = tiled::Loader::new();
+    let map = loader
+        .load_tmx_map(Path::new(MAP_PATH))
+        .unwrap_or_else(|error| panic!("failed to load map {MAP_PATH}: {error}"));
+
+    let mut pushable_entity = None;
+    let mut zone = None;
+    let mut gate_rect = None;
+
+    for layer in map.layers() {
+        if layer.name != "puzzle" {
+            continue;
+        }
+        let tiled::LayerType::Objects(object_layer) = layer.layer_type() else {
+            continue;
+        };
+        for object in object_layer.objects() {
+            match &object.shape {
+                tiled::ObjectShape::Point(..) => {
+                    let position = Position {
+                        x: object.x,
+                        y: -object.y,
+                    };
+                    // weight 1.0: an ordinary-feeling block — see
+                    // `pushable_physics`'s doc comment for why this has
+                    // density/damping at all (a real live-playtest finding,
+                    // not a hypothetical).
+                    let (density, damping) = pushable_physics(1.0);
+                    let entity = commands
+                        .spawn((
+                            Replicated,
+                            PushableObject,
+                            position,
+                            RigidBody::Dynamic,
+                            Collider::circle(PUSHABLE_OBJECT_SIZE / 2.0),
+                            LockedAxes::ROTATION_LOCKED,
+                            Friction::ZERO,
+                            density,
+                            damping,
+                            PhysicsPosition(Vector::new(position.x, position.y)),
+                            LinearVelocity::default(),
+                        ))
+                        .id();
+                    pushable_entity = Some(entity);
+                }
+                tiled::ObjectShape::Rect { width, height }
+                    if object.name == PUZZLE_ZONE_OBJECT_NAME =>
+                {
+                    zone = Some(Zone {
+                        min_x: object.x,
+                        max_x: object.x + width,
+                        min_y: -(object.y + height),
+                        max_y: -object.y,
+                    });
+                }
+                tiled::ObjectShape::Rect { width, height }
+                    if object.name == PUZZLE_GATE_OBJECT_NAME =>
+                {
+                    gate_rect = Some((object.x, object.y, *width, *height));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let (Some(pushable_entity), Some(zone), Some((gate_x, gate_y, gate_width, gate_height))) =
+        (pushable_entity, zone, gate_rect)
+    else {
+        return;
+    };
+
+    let gate_position = Position {
+        x: gate_x + gate_width / 2.0,
+        y: -(gate_y + gate_height / 2.0),
+    };
+    commands.spawn((
+        Replicated,
+        Gate,
+        gate_position,
+        Unlockable {
+            conditions: vec![UnlockCondition::ObjectInZone {
+                object: pushable_entity,
+                zone,
+            }],
+        },
+        RigidBody::Static,
+        Collider::rectangle(gate_width, gate_height),
+        PhysicsPosition(Vector::new(gate_position.x, gate_position.y)),
+    ));
+}
+
+/// Bridges `game_core::GateOpen`'s presence to avian2d's own
+/// `ColliderDisabled` — `game_core` has no physics-engine dependency (see
+/// `CLAUDE.md`'s crate boundaries), so `update_unlockables` can only toggle
+/// the game_core-level marker; this is the one place that actually becomes
+/// a collision change, the same server-only "physics wiring" role
+/// `sync_enemy_velocity_to_physics` plays for enemies. `GateOpen` present
+/// means passable, so its *insertion* disables the collider and its
+/// *removal* re-enables it — the opposite direction from how it reads at
+/// first glance.
+fn sync_gate_collider(
+    mut commands: Commands,
+    opened: Query<Entity, Added<GateOpen>>,
+    mut closed: RemovedComponents<GateOpen>,
+) {
+    for entity in &opened {
+        commands.entity(entity).insert(ColliderDisabled);
+    }
+    for entity in closed.read() {
+        commands.entity(entity).remove::<ColliderDisabled>();
+    }
+}
+
 fn update_delta_seconds(time: Res<Time>, mut delta: ResMut<DeltaSeconds>) {
     delta.0 = time.delta_secs();
 }
@@ -1270,8 +1518,11 @@ fn apply_learn_skill_input(
 }
 
 /// Any `avian2d` body whose `game_core::Position` needs to stay in sync with
-/// physics — players and enemies alike.
-type PhysicsBodies = Or<(With<Player>, With<Enemy>)>;
+/// physics — players, enemies, and (M8.9) pushable objects alike.
+/// Destructibles/`Unlockable` gates are deliberately excluded: both are
+/// `RigidBody::Static` and never move, so their `PhysicsPosition` is set
+/// once at spawn and never needs resyncing.
+type PhysicsBodies = Or<(With<Player>, With<Enemy>, With<PushableObject>)>;
 
 /// Copies avian2d's resolved position into the replicated `game_core::Position`
 /// each tick, after the physics step has already run (avian2d schedules its

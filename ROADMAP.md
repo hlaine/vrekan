@@ -1028,41 +1028,117 @@ visible inconsistency worth fixing later, not a design decision — see
 
 ## M8.9 — Dynamic objects: destructibles & movable puzzle objects
 
+**Implementation status: everything below is built, unit-tested, passes the
+full verification loop (build/test/clippy/fmt), and confirmed live.**
+Confirmed with the user before touching `protocol` (five new replicated
+components — `Destructible`/`DestructibleKind`/`PushableObject`/`Gate`/
+`GateOpen` — `PROTOCOL_ID` 3→4, no save-file impact, same as M8.8) and
+before authoring a live-testable smoke-test instance beyond what this
+section's "no actual puzzle authored yet" wording literally asks for.
+**Live-tested in two passes**: the first pass's pushable block drifted
+indefinitely once touched (no friction, no damping, and — unlike players/
+enemies — nothing re-drives its velocity every tick to mask that), fixed
+with `LinearDamping`; that led to a follow-up design ask (movable vs.
+immovable destructibles, a weight-driven push feel), built and then
+**re-confirmed live** — breaking crates/barrels/pillars, pushing the
+weighted block, and the gate opening all working. **Not yet committed.**
+
 ### Destructibles
-- [ ] `content::DestructibleTemplate` (health, loot table, optional
+- [x] `content::DestructibleTemplate` (health, loot table, optional
   resistances) — same shape as `EnemyTemplate` minus AI/`XpReward`/attack
   fields, reusing the established "new content type, spawned from a Tiled
   object layer" pattern (interactables, torches).
-- [ ] `spawn_destructibles`, reading a new `"destructibles"` Tiled object
-  layer, mirroring `spawn_interactables`/`spawn_torch_lights`.
-- [ ] No changes to `attack_system`'s nearest-target search — destructibles
+  **Found via review, fixed before this could ship as a silent bug:**
+  `combat::resolve_melee_hit` reads *both* attacker's and target's
+  `ActiveEffects` unconditionally (`Query::get_many_mut([attacker,
+  target])`) and silently no-ops the whole hit if either is missing it —
+  exactly the "stat exists but does nothing" class M8.6's DECISIONS.md
+  entry warns about, just for a component presence instead of a formula
+  input. `content::spawn_destructible` includes `ActiveEffects::default()`
+  for this reason, even though a destructible has no AI to ever apply an
+  effect to itself.
+- [x] `spawn_destructibles`, reading a new `"destructibles"` Tiled object
+  layer, mirroring `spawn_interactables`/`spawn_torch_lights`. A new
+  `DestructibleTemplate::movable` field (default `false`) branches spawn
+  physics: immovable destructibles (e.g. a stone pillar) are
+  `RigidBody::Static` — no ongoing `PhysicsPosition`↔`Position` sync
+  needed, only a one-time placement at spawn — while `movable: true`
+  destructibles (e.g. a crate) are spawned exactly like a pushable object
+  (`RigidBody::Dynamic` + `game_core::PushableObject`, see below), added to
+  `server`'s `PhysicsBodies` sync filter that way rather than needing a
+  second filter branch. **Confirmed live, not assumed**: the user
+  specifically asked for this movable/immovable split and a weight-driven
+  push feel after the first pushable-object pass shipped — a real
+  gameplay-feel decision surfaced via playtesting, not something
+  `MECHANICS.md`/`ROADMAP.md` had already specified.
+- [x] No changes to `attack_system`'s nearest-target search — destructibles
   participate in the exact same `With<Health>` targeting as enemies, same
   priority, by design (see `MECHANICS.md`). `death_system` already
   handles the drop/despawn path unmodified.
-- [ ] A couple of real `.ron` destructible templates (e.g. a crate with a
-  common-loot table, a barrel with a currency-only table) to prove the
-  schema.
+- [x] Three real `.ron` destructible templates: `crate_common` (movable,
+  weight `1.0`, a mixed item/rune/currency loot table), `barrel_currency`
+  (immovable, currency-only), and `stone_pillar` (immovable, no loot — added
+  specifically to prove the `movable: false` default branch with a real
+  content example, matching the user's own illustrative example) — all
+  three placed live in `valley.tmx`'s new `"destructibles"` layer, in the
+  open bottom field alongside the existing enemy spawns.
 
 ### Movable puzzle objects & gates
-- [ ] Pushable object: a `RigidBody::Dynamic` entity with mass, no
-  `Health`/AI — reuses the existing enemy-push physics wholesale, no new
-  physics work.
-- [ ] Generic `Unlockable` gate primitive: an entity whose collider toggles
-  between blocking and passable, driven by `Vec<UnlockCondition>` where
-  **all conditions must hold simultaneously (AND, not OR)** — state this
-  explicitly in the type's doc comment, since M8.13 builds against it and
-  the semantics matter for that milestone's multi-key gate idea. Starts
-  with one variant, `ObjectInZone { object, zone }`, shaped so a
-  `HasKeyItem` variant (M8.13) can be added later without restructuring.
-- [ ] Trigger-zone check: a system comparing a pushable object's `Position`
-  against a defined target area (Tiled point or rectangle object),
-  flipping the matching `Unlockable`'s state when satisfied.
-- [ ] Puzzle placement/layout is per-dungeon content (M9's job) — this
-  milestone builds the mechanical primitives only, no actual puzzle
-  authored yet.
-- [ ] Tests: zone-overlap detection, gate state toggling (including a
-  multi-condition gate correctly staying closed until *all* conditions
-  are met), gate staying closed when no condition is met.
+- [x] Pushable object (`game_core::PushableObject`, a replicated marker): a
+  `RigidBody::Dynamic` entity with mass, no `Health`/AI. **Not quite "no
+  new physics work" as originally scoped** — confirmed via a real live
+  playtest, not assumed: reusing the enemy-push bundle verbatim
+  (`Friction::ZERO`, no damping) let the block drift indefinitely once
+  touched, because unlike players/enemies nothing re-drives a pushable
+  object's velocity every tick to mask a lack of damping. Fixed with a new
+  shared `server::pushable_physics(weight) -> (ColliderDensity,
+  LinearDamping)` helper — used by both the smoke-test block (`weight:
+  1.0`) and any `movable: true` destructible — so a heavier `weight` feels
+  harder to budge and settles back to rest almost immediately, while a
+  lighter one is easier to nudge with a touch more give, never drifting
+  indefinitely at any weight. `server`'s `PhysicsBodies` sync filter
+  widened to include `PushableObject` (destructibles that stay immovable,
+  and gates, being `RigidBody::Static`, deliberately were not).
+- [x] Generic `Unlockable` gate primitive (`game_core::dynamic_object`): an
+  entity whose collider toggles between blocking and passable, driven by
+  `Vec<UnlockCondition>` where **all conditions must hold simultaneously
+  (AND, not OR)** — stated explicitly in the type's doc comment, since
+  M8.13 builds against it and the semantics matter for that milestone's
+  multi-key gate idea. Starts with one variant, `ObjectInZone { object,
+  zone }`, shaped so a `HasKeyItem` variant (M8.13) can be added later
+  without restructuring. `Unlockable` itself is deliberately **not**
+  replicated — the client only needs to know a gate is currently open, not
+  why, so a separate always-present `Gate` marker (for the client to
+  identify a gate entity at all) plus `GateOpen` (present only while open,
+  replicated like `Downed`/`Stunned`) carry that across the wire instead.
+- [x] Trigger-zone check: `unlock_conditions_met`/`update_unlockables`, a
+  system comparing a pushable object's `Position` against a defined target
+  area (a Tiled rectangle object's world-space bounds, resolved once at
+  spawn into a plain `Zone { min_x, max_x, min_y, max_y }`), toggling the
+  matching `Unlockable`'s `GateOpen` presence when satisfied.
+  **A real crate-boundary constraint surfaced during implementation, not
+  guessed around**: `game_core` has no physics-engine dependency
+  (`CLAUDE.md`'s crate boundaries), so `update_unlockables` can only
+  toggle the game_core-level `GateOpen` marker — it can't touch avian2d's
+  `ColliderDisabled` directly. A new `server`-only `sync_gate_collider`
+  system bridges the two, the same "physics wiring lives in `server`" role
+  `sync_enemy_velocity_to_physics` already plays for enemies. See
+  `DECISIONS.md`'s M8.9 entry for the full reasoning.
+- [x] Puzzle placement/layout is per-dungeon content (M9's job) — this
+  milestone builds the mechanical primitives only. **One exception,
+  confirmed with the user**: a single minimal smoke-test instance (one
+  pushable block, one target zone, one gate) was placed in `valley.tmx`'s
+  new `"puzzle"` layer, clearly commented as a mechanism smoke test (the
+  same role M8.5's first test light/occluder played), not real puzzle
+  design — `server`'s `spawn_pushables_and_gates` hardcodes matching this
+  one fixed-name instance rather than building the generic named-linking
+  scheme M9 will actually need for real dungeon puzzles.
+- [x] Tests: zone-overlap detection (`Zone::contains`, inclusive
+  boundaries), gate state toggling via `update_unlockables` (opens once
+  its condition is met, closes again once it stops holding, stays closed
+  when its referenced object has despawned), multi-condition AND semantics
+  (a gate with two conditions stays closed until *both* hold, not just
+  one).
 
 ## M8.10 — Rune discovery & learning
 

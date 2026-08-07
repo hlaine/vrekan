@@ -1,4 +1,6 @@
 pub mod combat;
+pub mod destructible;
+pub mod dynamic_object;
 pub mod economy;
 pub mod enemy;
 pub mod interact;
@@ -15,6 +17,11 @@ pub use combat::{
     is_critically_low_health, is_within_attack_arc, AttackRequested, AttackTimer, CombatStats,
     DamageType, Health, MeleeAttack, RecentCrit, Resistances, CRITICALLY_LOW_HEALTH_THRESHOLD,
     MELEE_ARC_HALF_ANGLE_RADIANS,
+};
+pub use destructible::{Destructible, DestructibleKind};
+pub use dynamic_object::{
+    unlock_conditions_met, update_unlockables, Gate, GateOpen, PushableObject, UnlockCondition,
+    Unlockable, Zone,
 };
 pub use economy::{
     buy_item, sell_item, socketed_item_sell_value, Currency, VendorLibrary, VendorListing,

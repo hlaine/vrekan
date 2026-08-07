@@ -22,9 +22,10 @@ use bevy_replicon_renet::{
     RenetChannelsExt, RenetClient, RepliconRenetPlugins,
 };
 use content::{
-    load_all_enemy_templates, load_all_interactable_templates, load_all_item_templates,
-    load_all_rune_templates, load_all_vendor_templates, EnemyTemplate, InteractableTemplate,
-    ItemTemplate, RuneTemplate, VendorTemplate,
+    load_all_destructible_templates, load_all_enemy_templates, load_all_interactable_templates,
+    load_all_item_templates, load_all_rune_templates, load_all_vendor_templates,
+    DestructibleTemplate, EnemyTemplate, InteractableTemplate, ItemTemplate, RuneTemplate,
+    VendorTemplate,
 };
 use game_core::movement::Position;
 use game_core::player::Player;
@@ -34,10 +35,11 @@ use game_core::player::Player;
 // collide.
 use game_core::{
     is_critically_low_health, nearest_interactable_in_range, socketed_item_sell_value, xp_required,
-    Attribute as PrimaryAttribute, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
-    EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
-    KnownSkills, Level, Od, RecentCrit, RuneInventory, SkillCooldowns, Stats, Stunned,
-    UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE, VENDOR_PANEL_ID,
+    Attribute as PrimaryAttribute, Attributes, Currency, DeltaSeconds, Destructible,
+    DestructibleKind, Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Gate,
+    GateOpen, Health, Interactable, Inventory, Item, ItemDrop, KnownSkills, Level, Od,
+    PushableObject, RecentCrit, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints,
+    UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE, VENDOR_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -90,6 +92,9 @@ const CHARACTER_TOGGLE_KEY: KeyCode = KeyCode::KeyC;
 // its `EnemyKind` — the server is what actually spawns/simulates enemies
 // now (see `server/src/main.rs`'s `spawn_enemies`).
 const ENEMY_TEMPLATES_DIR: &str = "assets/enemies";
+
+// Same split as `ENEMY_TEMPLATES_DIR` above, for destructibles (M8.9).
+const DESTRUCTIBLE_TEMPLATES_DIR: &str = "assets/destructibles";
 
 // Loaded locally purely for `dialog`/`opens_panels` lookup by an
 // `Interactable`'s `template_key` — same "server spawns/resolves, client
@@ -224,6 +229,19 @@ const DAMAGE_FLASH_DURATION: f32 = 0.25;
 const DAMAGE_FLASH_PEAK_ALPHA: f32 = 0.35;
 const DAMAGE_FLASH_COLOR: (u8, u8, u8) = (180, 0, 0);
 
+// M8.9 pushable object / gate placeholder appearance. `PUSHABLE_OBJECT_SIZE`
+// intentionally matches `server`'s own constant of the same name/value (no
+// shared crate for it — the two are independently defined, same as most
+// other purely-cosmetic-vs-simulation constant pairs in this codebase) so
+// the sprite reads as the same size as the actual collider. `GATE_SPRITE_SIZE`
+// is a fixed placeholder, not derived from any particular gate's real Tiled
+// rectangle dimensions — those aren't replicated, only `Position` is.
+const PUSHABLE_OBJECT_SIZE: f32 = 28.0;
+const PUSHABLE_OBJECT_COLOR: Color = Color::srgb(0.5, 0.5, 0.6);
+const GATE_SPRITE_SIZE: Vec2 = Vec2::new(20.0, 30.0);
+const GATE_CLOSED_COLOR: Color = Color::srgb(0.5, 0.5, 0.5);
+const GATE_OPEN_COLOR: Color = Color::srgb(0.3, 0.8, 0.3);
+
 // This client's persistent character identity, generated once and reused
 // across runs — not tied to any account system (see DECISIONS.md's
 // identity-model entry). Relative to CWD, matching the project's existing
@@ -266,6 +284,12 @@ struct CharacterPanelOpen(bool);
 /// (health, damage, AI ranges) only matter server-side now.
 #[derive(Resource)]
 struct EnemyTemplates(Vec<(String, EnemyTemplate)>);
+
+/// Destructible templates loaded purely for appearance lookup (color/size)
+/// by `DestructibleKind` — see `init_replicated_destructibles`, the same
+/// role `EnemyTemplates` plays for enemies.
+#[derive(Resource)]
+struct DestructibleTemplates(Vec<(String, DestructibleTemplate)>);
 
 /// Interactable templates loaded purely for `dialog`/`opens_panels` lookup
 /// by an `Interactable`'s `template_key` — see `INTERACTABLE_TEMPLATES_DIR`'s
@@ -432,23 +456,40 @@ fn main() {
         .add_systems(
             Update,
             (
-                update_delta_seconds,
-                init_replicated_players,
-                init_replicated_enemies,
-                init_replicated_item_drops,
-                init_replicated_interactables,
-                spawn_torch_lights,
-                player_input_system,
-                interaction_trigger_system,
-                sync_transform_system,
-                party_camera_system,
-                status_indicator_system,
-                facing_indicator_system,
-                start_crit_flashes,
-                tick_crit_flashes,
-                bleeding_system,
-                detect_local_player_damage,
-                tick_damage_flash,
+                // Split into two chained groups, not one flat tuple —
+                // Bevy's `IntoSystemConfigs` tuple impl is only generated up
+                // to a fixed arity (20), and M8.9 pushed the total past it.
+                // Nesting still preserves the exact same overall ordering:
+                // the outer `.chain()` runs each group to completion before
+                // the next one starts, same as one long chain would (see
+                // `server/src/main.rs`'s identical precedent).
+                (
+                    update_delta_seconds,
+                    init_replicated_players,
+                    init_replicated_enemies,
+                    init_replicated_destructibles,
+                    init_replicated_pushables,
+                    init_replicated_gates,
+                    init_replicated_item_drops,
+                    init_replicated_interactables,
+                    spawn_torch_lights,
+                    player_input_system,
+                    interaction_trigger_system,
+                    sync_transform_system,
+                )
+                    .chain(),
+                (
+                    party_camera_system,
+                    status_indicator_system,
+                    facing_indicator_system,
+                    update_gate_appearance,
+                    start_crit_flashes,
+                    tick_crit_flashes,
+                    bleeding_system,
+                    detect_local_player_damage,
+                    tick_damage_flash,
+                )
+                    .chain(),
             )
                 .chain(),
         )
@@ -544,6 +585,11 @@ fn setup_scene(
     let templates = load_all_enemy_templates(Path::new(ENEMY_TEMPLATES_DIR))
         .unwrap_or_else(|error| panic!("failed to load enemy templates: {error}"));
     commands.insert_resource(EnemyTemplates(templates));
+
+    let destructible_templates =
+        load_all_destructible_templates(Path::new(DESTRUCTIBLE_TEMPLATES_DIR))
+            .unwrap_or_else(|error| panic!("failed to load destructible templates: {error}"));
+    commands.insert_resource(DestructibleTemplates(destructible_templates));
 
     let interactable_templates =
         load_all_interactable_templates(Path::new(INTERACTABLE_TEMPLATES_DIR))
@@ -688,6 +734,87 @@ fn init_replicated_enemies(
             ),
             Transform::default(),
         ));
+    }
+}
+
+/// Query filter matching newly-replicated destructible entities.
+type NewDestructibles<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static DestructibleKind),
+    (With<Destructible>, Added<DestructibleKind>),
+>;
+
+/// Reacts to newly-replicated destructible entities (spawned server-side —
+/// see `server/src/main.rs`'s `spawn_destructibles`) — same
+/// appearance-lookup-by-kind role `init_replicated_enemies` plays for
+/// enemies.
+fn init_replicated_destructibles(
+    mut commands: Commands,
+    templates: Res<DestructibleTemplates>,
+    new_destructibles: NewDestructibles,
+) {
+    for (entity, kind) in &new_destructibles {
+        let Some((_, template)) = templates.0.iter().find(|(k, _)| *k == kind.0) else {
+            continue;
+        };
+        commands.entity(entity).insert((
+            Sprite::from_color(
+                Color::srgb(template.color[0], template.color[1], template.color[2]),
+                Vec2::splat(template.size),
+            ),
+            Transform::default(),
+        ));
+    }
+}
+
+/// Reacts to a newly-replicated pushable object (the M8.9 smoke-test block
+/// — see `server`'s `spawn_pushables_and_gates`) with a placeholder square
+/// sprite, no content template — unlike destructibles/enemies, nothing
+/// asks for pushable-object visual variety yet.
+///
+/// **`Without<DestructibleKind>`**: a `movable: true` destructible (e.g. a
+/// pushable crate) carries `PushableObject` too, for the shared physics
+/// tuning (see `server::pushable_physics`) — without this filter, this
+/// system would race `init_replicated_destructibles` and could clobber a
+/// crate's real template-driven appearance with this generic placeholder.
+fn init_replicated_pushables(
+    mut commands: Commands,
+    new_pushables: Query<Entity, (Added<PushableObject>, Without<DestructibleKind>)>,
+) {
+    for entity in &new_pushables {
+        commands.entity(entity).insert((
+            Sprite::from_color(PUSHABLE_OBJECT_COLOR, Vec2::splat(PUSHABLE_OBJECT_SIZE)),
+            Transform::default(),
+        ));
+    }
+}
+
+/// Reacts to a newly-replicated gate (`game_core::Gate`, always present —
+/// see that marker's doc comment for why a separate one exists alongside
+/// `Unlockable`, which never replicates) with a placeholder rectangle
+/// sprite. `update_gate_appearance` (below) keeps its color in sync with
+/// `GateOpen` afterward.
+fn init_replicated_gates(mut commands: Commands, new_gates: Query<Entity, Added<Gate>>) {
+    for entity in &new_gates {
+        commands.entity(entity).insert((
+            Sprite::from_color(GATE_CLOSED_COLOR, GATE_SPRITE_SIZE),
+            Transform::default(),
+        ));
+    }
+}
+
+/// Recolors a gate's sprite to reflect `GateOpen`'s presence — cheap
+/// placeholder feedback (no real art) so pushing the M8.9 smoke-test block
+/// into its zone is visibly confirmable live, not just inferable from
+/// walking through where the gate used to block.
+fn update_gate_appearance(mut gates: Query<(&mut Sprite, Has<GateOpen>), With<Gate>>) {
+    for (mut sprite, open) in &mut gates {
+        sprite.color = if open {
+            GATE_OPEN_COLOR
+        } else {
+            GATE_CLOSED_COLOR
+        };
     }
 }
 

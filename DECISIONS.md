@@ -1595,3 +1595,158 @@ stays deferred to M9 as `ROADMAP.md` already specified. The skill-cast
 crit-flash gap above is the one concrete follow-up worth picking up
 alongside or before M9, once it's clear whether skills stay a fully
 separate resolution path from melee long-term or eventually get unified.
+
+## M8.9: dynamic objects — GateOpen/ColliderDisabled kept out of game_core
+## on purpose, a real ActiveEffects gap caught before shipping, and a
+## deliberate scope exception (one smoke-test puzzle) confirmed with the user
+
+**Context.** `MECHANICS.md`'s Dynamic objects section and `ROADMAP.md`'s
+M8.9 bullets already specified almost the entire shape — destructibles as
+"an enemy template stripped down," pushable objects reusing enemy-push
+physics wholesale, `Unlockable`'s AND-semantics condition list. Two things
+confirmed with the user before building: the protocol touch (five new
+replicated components: `Destructible`/`DestructibleKind`/`PushableObject`/
+`Gate`/`GateOpen`, `PROTOCOL_ID` 3→4, no save-file impact — same pattern as
+M8.7/M8.8), and a deliberate scope exception explained below. This entry
+covers three things worth remembering, not already obvious from
+`ROADMAP.md`'s writeup.
+
+**1. `game_core` cannot own the actual collision toggle — `GateOpen`
+(game_core) and `ColliderDisabled` (avian2d) had to stay two separate
+things.** The natural first instinct was to have `update_unlockables`
+directly flip whatever makes a gate's collider passable. But `game_core`
+has no physics-engine dependency at all (`CLAUDE.md`'s crate boundaries:
+"No rendering or networking dependencies" — physics is the same category
+of concern, kept out for the same reason: `game_core` logic needs to stay
+testable without spinning up a Bevy app *or* an avian2d world). Resolved
+by treating this exactly like the enemy-velocity case that already existed:
+`game_core::update_unlockables` only ever toggles a plain, physics-agnostic
+`GateOpen` marker; a new `server`-only `sync_gate_collider` system
+bridges that to avian2d's real `ColliderDisabled`, the same "physics wiring
+lives in `server`, gameplay decisions live in `game_core`" split
+`sync_enemy_velocity_to_physics` already established. Worth remembering:
+`ColliderDisabled` *disables* the collider, i.e. its *presence* means
+passable — inserted when `GateOpen` is added, removed when `GateOpen` is
+removed. Easy to get backwards (a first draft did, caught during review
+before it compiled into a "the gate blocks when it should be open" bug).
+
+**2. A second real "attack silently does nothing" gap, same class M8.6 hit
+twice and M8.8 flagged for skill.rs — caught before shipping this time.**
+`combat::resolve_melee_hit` requires *both* the attacker's and the target's
+`ActiveEffects` component to resolve a hit at all (`Query::get_many_mut`
+on `[attacker, target]` returns `Err`, and the whole function returns
+`false` — no damage applied — if either is missing it). A destructible has
+no AI and will never realistically have a status effect applied to it, so
+omitting `ActiveEffects` felt harmless when first sketching
+`spawn_destructible`. It would have made every single attack against a
+destructible a complete, silent no-op — nothing server-side would have
+errored, logged, or even looked wrong until someone actually tried
+attacking a crate live and found it unbreakable. Caught by tracing through
+`resolve_melee_hit`'s exact requirements before writing `spawn_destructible`,
+not by a failing test — worth remembering as a checklist item (does this
+new entity type satisfy every non-`Option` parameter `resolve_melee_hit`/
+`attack_system` require?) any time a new `Health`-bearing, attackable
+entity type gets added in the future.
+
+**3. Scope exception, confirmed rather than assumed: one smoke-test puzzle
+instance, despite `ROADMAP.md`'s "no actual puzzle authored yet."**
+`MECHANICS.md` scopes real puzzle *placement* to M9 explicitly. Read
+literally, that could mean building `Unlockable`/the trigger-zone check/
+pushable spawning with zero live-testable instance at all this milestone —
+consistent with the milestone's own stated boundary, but in tension with
+this project's strong "confirm every milestone live, not just via unit
+tests" convention (the M8.6-M8.8 pattern this session already followed).
+Rather than silently deciding either way, this was surfaced directly and
+the user chose the smoke-test option: one hardcoded pushable+zone+gate
+instance in `valley.tmx`, explicitly commented as a mechanism proof (same
+role M8.5's first test light/occluder played before that milestone
+invested further), not real dungeon puzzle design. `server`'s
+`spawn_pushables_and_gates` deliberately does *not* build a generic
+named-linking scheme for matching arbitrary zones/gates/pushables together
+— that's real puzzle-authoring infrastructure, which stays M9's job.
+
+**Consequences / what's still open:** code-complete, full verification
+loop clean. This is the first M8.x milestone this session touching actual
+world-object physics (destructibles blocking movement, a pushable block, a
+gate's collider toggling), and that mattered in practice: the first live
+playtest immediately surfaced a real bug (below) that no unit test could
+have caught, since none of them exercise actual avian2d collision/velocity
+integration. The destructible/pushable/gate placeholder appearances (flat
+colored squares/rectangles, gate recolors gray→green closed→open) are
+exactly that — placeholders, not tuned or final.
+`spawn_pushables_and_gates`'s hardcoded single-instance wiring is
+explicitly throwaway scaffolding, expected to be replaced entirely once M9
+designs real puzzle content, not extended incrementally.
+
+## M8.9 follow-up: a real live-playtest bug (pushable objects drifting
+## forever), and a design refinement (movable/weight) it led to
+
+**The bug.** First live test: pushing the smoke-test block sent it
+drifting away indefinitely instead of coming to rest. Root cause was
+copying the enemy-push bundle (`Friction::ZERO`, `RigidBody::Dynamic`,
+`LockedAxes::ROTATION_LOCKED`) without noticing a real asymmetry —
+players and enemies have *something else* re-driving their `LinearVelocity`
+every single tick regardless (`apply_move_input` reading client input,
+`sync_enemy_velocity_to_physics` reading `ai_system`'s decision), so
+`Friction::ZERO` never mattered for them: nothing ever "coasts" because
+velocity gets overwritten before it could. A pushable object has no input
+and no AI — a collision impulse from being touched is the *only* thing
+that ever sets its velocity, so with zero friction and no damping, physics
+correctly and predictably kept it moving at a constant velocity forever
+(Newtonian mechanics working exactly as specified, just not as intended).
+Fixed with `LinearDamping`, which decays velocity back toward zero on its
+own, independent of contact/friction.
+
+**The follow-up design ask.** Once damping fixed the drift, the user asked
+for something structurally new: some destructibles should be movable (a
+crate — should push and settle immediately, not slide) and others
+shouldn't (a stone pillar), and movable ones need a tunable "weight" for
+how heavy/light they feel. This wasn't a bug report, it was new scope —
+handled the same way as every other M8.x design point this session: built
+directly (the request was clear enough not to need a clarifying question),
+then disclosed here.
+
+**Design choices made, worth remembering:**
+- `weight` maps to **both** `ColliderDensity` (avian2d's actual mass lever
+  — higher density means more resistance to accelerating under a fixed
+  push force, i.e. "harder to budge") **and** `LinearDamping`, scaled
+  together (`PUSHABLE_BASE_DAMPING * weight`) rather than as two
+  independently-tuned numbers. A single knob was chosen deliberately: the
+  user asked for one parameter ("a weight parameter"), and this project's
+  "tune by feel" constants are already numerous enough that adding two
+  independent levers where one clean one suffices would be exactly the
+  kind of premature-complexity `CLAUDE.md` warns against.
+- `weight` does **not** scale `Friction` — that stays `Friction::ZERO`
+  uniformly, same as players/enemies. Friction (in avian2d's model) governs
+  resistance while *sliding in contact* against another surface; the
+  actual "does it drift" behavior for a freestanding pushed object is
+  entirely `LinearDamping`'s job here, so touching both would be tuning
+  two levers for one effect with no way to reason about which one to turn.
+- A movable destructible reuses `PushableObject` itself (not a parallel
+  marker) — it's spawned with the exact same physics bundle
+  `spawn_pushables_and_gates`' smoke-test block gets, via the same new
+  shared `pushable_physics(weight)` helper, so a crate and a puzzle block
+  can never drift out of sync in how they feel. This is also *why*
+  `server`'s `PhysicsBodies` sync filter only needed widening once (to
+  `PushableObject`) rather than needing a second case for "movable
+  destructibles" specifically.
+- **A client-side bug caught before it shipped, not after**: a movable
+  destructible now carries both `DestructibleKind` (drives its real
+  template-colored appearance) and `PushableObject` (drives the generic
+  placeholder pushable appearance) — two systems reacting to two different
+  `Added<>` markers on the same entity, racing to set its `Sprite`. Traced
+  through before running it, not found by a failing test:
+  `init_replicated_pushables` gained a `Without<DestructibleKind>` filter
+  so it only ever touches "pure" pushables (the puzzle block), leaving a
+  movable crate's real appearance alone.
+
+**Consequences:** confirmed live after this second pass — breaking
+`crate_common`/`barrel_currency`/`stone_pillar`, pushing the weighted
+block (settles quickly, no drift), and the gate opening once it entered
+the zone all worked as intended. The smoke-test block and `crate_common`
+both use `weight: 1.0`, reproducing the exact damping value the first live
+test already confirmed felt reasonable. `stone_pillar` is a new third
+destructible template, added specifically to give the `movable: false`
+(default) branch a real, live-placed content example rather than only
+being covered by the two pre-existing static templates changing meaning
+implicitly.

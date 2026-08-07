@@ -1,0 +1,13 @@
+(
+    max_health: 15.0,
+    color: (0.55, 0.38, 0.2),
+    size: 24.0,
+    drop_chance: 0.5,
+    loot_table: [
+        (kind: Item("wolf_pelt_cap"), weight: 1.0),
+        (kind: Rune("swift_shard"), weight: 1.0),
+        (kind: Currency(5), weight: 2.0),
+    ],
+    movable: true,
+    weight: 1.0,
+)

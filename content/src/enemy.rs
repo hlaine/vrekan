@@ -73,7 +73,9 @@ pub struct LootEntryTemplate {
 }
 
 impl LootEntryTemplate {
-    fn into_entry(self) -> LootEntry {
+    /// `pub(crate)`: reused by `destructible::spawn_destructible`'s own
+    /// `LootTable` construction, the same shape `spawn_enemy` uses.
+    pub(crate) fn into_entry(self) -> LootEntry {
         LootEntry {
             kind: match self.kind {
                 LootKindTemplate::Item(template_key) => LootKind::Item(template_key),

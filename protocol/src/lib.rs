@@ -3,17 +3,17 @@ use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
-    AttackTimer, Attribute, Attributes, Currency, Downed, Enemy, EnemyKind, EquipSlot, Equipment,
-    Facing, Health, Interactable, Inventory, ItemDrop, KnownSkills, Level, Od, Position,
-    RecentCrit, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints,
-    UnspentStatPoints,
+    AttackTimer, Attribute, Attributes, Currency, Destructible, DestructibleKind, Downed, Enemy,
+    EnemyKind, EquipSlot, Equipment, Facing, Gate, GateOpen, Health, Interactable, Inventory,
+    ItemDrop, KnownSkills, Level, Od, Position, PushableObject, RecentCrit, RuneInventory,
+    SkillCooldowns, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
 /// shapes) so incompatible client/server builds refuse to connect instead of
 /// silently desyncing.
-pub const PROTOCOL_ID: u64 = 3;
+pub const PROTOCOL_ID: u64 = 4;
 
 pub const SERVER_PORT: u16 = 5000;
 
@@ -248,6 +248,11 @@ impl Plugin for NetworkPlugin {
             .replicate::<Interactable>()
             .replicate::<Currency>()
             .replicate::<RecentCrit>()
+            .replicate::<Destructible>()
+            .replicate::<DestructibleKind>()
+            .replicate::<PushableObject>()
+            .replicate::<Gate>()
+            .replicate::<GateOpen>()
             .add_client_message::<MoveInput>(Channel::Unreliable)
             .add_client_message::<AttackInput>(Channel::Unreliable)
             .add_client_message::<ReviveInput>(Channel::Unreliable)

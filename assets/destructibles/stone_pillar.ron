@@ -1,0 +1,8 @@
+(
+    max_health: 60.0,
+    color: (0.5, 0.5, 0.52),
+    size: 30.0,
+    // No loot table: an immovable stone pillar isn't worth grinding on for
+    // drops — it's here to prove the `movable: false` (default) branch,
+    // not as a farming spot.
+)

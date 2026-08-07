@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<map version="1.10" tiledversion="1.11.0" orientation="orthogonal" renderorder="right-down" width="20" height="15" tilewidth="32" tileheight="32" infinite="0" nextlayerid="6" nextobjectid="8">
+<map version="1.10" tiledversion="1.11.0" orientation="orthogonal" renderorder="right-down" width="20" height="15" tilewidth="32" tileheight="32" infinite="0" nextlayerid="8" nextobjectid="13">
  <tileset firstgid="1" name="valley_tileset" tilewidth="32" tileheight="32" tilecount="2" columns="2">
   <image source="valley_tileset.png" width="64" height="32"/>
  </tileset>
@@ -67,5 +67,23 @@
   <object id="7" name="torch" x="580" y="60">
    <point/>
   </object>
+ </objectgroup>
+ <objectgroup id="6" name="destructibles">
+  <object id="8" name="crate_common" x="450" y="440">
+   <point/>
+  </object>
+  <object id="9" name="barrel_currency" x="500" y="440">
+   <point/>
+  </object>
+ </objectgroup>
+ <objectgroup id="7" name="puzzle">
+  <!-- M8.9 smoke test only (not real puzzle content, see
+       spawn_pushables_and_gates' doc comment): a pushable block that opens
+       a gate once pushed into the marked zone. -->
+  <object id="10" name="block" x="540" y="450">
+   <point/>
+  </object>
+  <object id="11" name="test_zone" x="570" y="435" width="30" height="30"/>
+  <object id="12" name="test_gate" x="610" y="435" width="20" height="30"/>
  </objectgroup>
 </map>

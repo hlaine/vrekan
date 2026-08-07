@@ -1,9 +1,14 @@
+pub mod destructible;
 pub mod economy;
 pub mod enemy;
 pub mod interact;
 pub mod item;
 pub mod skill;
 
+pub use destructible::{
+    load_all_destructible_templates, load_destructible_template, parse_destructible_template,
+    spawn_destructible, DestructibleTemplate,
+};
 pub use economy::{
     load_all_vendor_templates, load_vendor_template, parse_vendor_template, VendorListingTemplate,
     VendorTemplate,
