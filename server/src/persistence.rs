@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use game_core::{
-    Currency, Equipment, Inventory, KnownSkills, Level, RuneInventory, Stats, UnspentSkillPoints,
-    UnspentStatPoints,
+    Attributes, Currency, Equipment, Inventory, KnownSkills, Level, RuneInventory, Stats,
+    UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,7 @@ pub struct CharacterSave {
     pub password: String,
     pub level: Level,
     pub stats: Stats,
+    pub attributes: Attributes,
     pub points: UnspentStatPoints,
     pub known_skills: KnownSkills,
     pub skill_points: UnspentSkillPoints,
@@ -201,6 +202,7 @@ mod tests {
             password: "correct-horse".to_string(),
             level: Level { level: 3, xp: 42.0 },
             stats: Stats::default(),
+            attributes: Attributes::default(),
             points: UnspentStatPoints(2),
             known_skills: KnownSkills::default(),
             skill_points: UnspentSkillPoints(1),

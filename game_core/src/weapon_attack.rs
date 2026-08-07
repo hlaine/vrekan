@@ -81,6 +81,41 @@ pub fn effective_weapon_stats(equipment: Option<&Equipment>, items: &ItemLibrary
         .unwrap_or_else(unarmed_weapon_stats)
 }
 
+/// Sum of every source of attack-speed bonus — active effects + equipped
+/// gear/runes + Dexterity-derived level points (`Stats::bonus_attack_speed`)
+/// — the same 4-way shape (minus a "base," since there's no baseline
+/// attack-speed scalar to start from) `resolve_melee_hit` already uses for
+/// crit chance. Computed fresh at point of use, never cached — see
+/// MECHANICS.md's "Effective combat values are always computed fresh"
+/// section. Clamped to non-negative: every current source is additive and
+/// non-negative, but `effective_recovery` divides by `1.0 + this value`, so
+/// this is a defensive floor against a future negative-magnitude source
+/// (e.g. a slow debuff) rather than a case reachable today.
+pub fn effective_attack_speed_bonus(
+    attacker_effects: &ActiveEffects,
+    attacker_equipment: Option<&Equipment>,
+    attacker_level_stats: Option<&Stats>,
+    runes: &RuneLibrary,
+) -> f32 {
+    let equipment_bonus = attacker_equipment
+        .map(|equipment| equipment.stat_bonus(Stat::AttackSpeed, runes))
+        .unwrap_or(0.0);
+    let level_bonus = attacker_level_stats
+        .map(|stats| stats.bonus_attack_speed)
+        .unwrap_or(0.0);
+    (attacker_effects.stat_bonus(Stat::AttackSpeed) + equipment_bonus + level_bonus).max(0.0)
+}
+
+/// MECHANICS.md's Weapons & attack timing formula: attack speed compresses
+/// `base_recovery` only, never windup (see `start_player_windups`, which
+/// still sets windup straight from `weapon.attack_duration`). Dividing by
+/// `1.0 + attack_speed_bonus` rather than subtracting keeps the result
+/// strictly positive for any non-negative bonus, with no separate clamp
+/// needed against hitting zero or negative recovery time.
+pub fn effective_recovery(base_recovery: f32, attack_speed_bonus: f32) -> f32 {
+    base_recovery / (1.0 + attack_speed_bonus.max(0.0))
+}
+
 /// Finds the nearest valid attack target for a player `attacker` within
 /// `range` and `attacker_facing`'s frontal cone — used to start a player's
 /// attack windup (see `start_player_windups`). Mirrors
@@ -285,18 +320,25 @@ type TickingPlayers<'w, 's> = Query<
 >;
 
 /// Advances every player's `AttackPhase` by one tick (via `tick_attack_phase`,
-/// using the *current* effective weapon's `recovery` — re-derived fresh each
-/// tick like everything else here, so switching weapons mid-recovery takes
-/// effect immediately rather than honoring a stale duration) and resolves
-/// the hit through `combat::resolve_melee_hit` whenever a windup completes.
+/// using the *current* effective weapon's `recovery`, compressed by
+/// `effective_attack_speed_bonus`/`effective_recovery` (M8.7) — both
+/// re-derived fresh each tick like everything else here, so switching
+/// weapons or gaining an attack-speed buff mid-recovery takes effect
+/// immediately rather than honoring a stale duration) and resolves the hit
+/// through `combat::resolve_melee_hit` whenever a windup completes.
 /// `Stunned`/`Downed` cancel an in-progress windup outright (see
 /// `tick_attack_phase`); the player's "fury" self-buff (`player_fury_effect`)
 /// applies on every landed hit, same as it did when it lived on the old
 /// `MeleeAttack` component.
+// Same false-positive shape `resolve_melee_hit`/`attack_system` already
+// carry this exact allow for — a flat Bevy system parameter list is the
+// idiomatic shape here, not a sign this needs bundling into a struct.
+#[allow(clippy::too_many_arguments)]
 pub fn tick_player_attack_phases(
     delta: Res<DeltaSeconds>,
     mut players: TickingPlayers,
     targets_equipment: Query<&Equipment>,
+    targets_level_stats: Query<&Stats>,
     mut healths: Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     mut all_effects: Query<&mut ActiveEffects>,
     items: Res<ItemLibrary>,
@@ -305,6 +347,7 @@ pub fn tick_player_attack_phases(
     let dt = delta.0;
     let mut rng = rand::rng();
     let fury = player_fury_effect();
+    let no_effects = ActiveEffects::default();
     for (
         entity,
         mut phase,
@@ -320,8 +363,11 @@ pub fn tick_player_attack_phases(
     ) in &mut players
     {
         let weapon = effective_weapon_stats(equipment, &items);
-        let (new_phase, event) =
-            tick_attack_phase(*phase, dt, stunned || downed, weapon.recovery.max(0.0));
+        let attacker_effects = all_effects.get(entity).unwrap_or(&no_effects);
+        let attack_speed_bonus =
+            effective_attack_speed_bonus(attacker_effects, equipment, level_stats, &runes);
+        let recovery = effective_recovery(weapon.recovery.max(0.0), attack_speed_bonus);
+        let (new_phase, event) = tick_attack_phase(*phase, dt, stunned || downed, recovery);
         *phase = new_phase;
 
         let Some(AttackPhaseEvent::HitReady { target }) = event else {
@@ -346,6 +392,7 @@ pub fn tick_player_attack_phases(
             level_stats,
             progress,
             targets_equipment.get(target).ok(),
+            targets_level_stats.get(target).ok(),
             &items,
             &mut healths,
             &mut all_effects,
@@ -364,6 +411,58 @@ mod tests {
 
     fn dummy_entity() -> Entity {
         World::new().spawn_empty().id()
+    }
+
+    #[test]
+    fn effective_recovery_at_zero_attack_speed_bonus_returns_base_recovery() {
+        assert!((effective_recovery(0.5, 0.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_recovery_shrinks_as_attack_speed_bonus_grows() {
+        // 1.0 bonus halves recovery: divide by (1.0 + 1.0).
+        assert!((effective_recovery(0.5, 1.0) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effective_recovery_never_reaches_zero_at_an_extreme_bonus() {
+        let recovery = effective_recovery(0.5, 1_000_000.0);
+
+        assert!(recovery > 0.0);
+        assert!(recovery < 0.001);
+    }
+
+    #[test]
+    fn effective_attack_speed_bonus_sums_dexterity_level_stats_equipment_and_effects() {
+        let mut world = World::new();
+        let attacker = world
+            .spawn((
+                ActiveEffects::default(),
+                Stats {
+                    bonus_attack_speed: 0.3,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let mut effects = world.get_mut::<ActiveEffects>(attacker).unwrap();
+        effects.apply(EffectDefinition {
+            id: "haste".to_string(),
+            kind: EffectKind::StatModifier {
+                stat: Stat::AttackSpeed,
+            },
+            duration: 5.0,
+            magnitude: 0.2,
+            stack_mode: crate::status_effect::StackMode::Independent,
+            applies_to: EffectTarget::Attacker,
+            chance: 1.0,
+        });
+        let effects = world.get::<ActiveEffects>(attacker).unwrap();
+        let stats = world.get::<Stats>(attacker).unwrap();
+        let runes = RuneLibrary::default();
+
+        let bonus = effective_attack_speed_bonus(effects, None, Some(stats), &runes);
+
+        assert!((bonus - 0.5).abs() < 1e-6);
     }
 
     #[test]

@@ -208,13 +208,16 @@ pub struct AttackerProgress<'a> {
 }
 
 /// Resolves a landed hit against `target`: effective crit stats (base +
-/// active effects + equipment + level points) and effective resistance
-/// (base + equipped armor/helmet, via `Equipment::resistance_bonus`), both
-/// computed fresh — see MECHANICS.md's "Effective combat values are always
-/// computed fresh" section — then `resolve_damage`, `Od` gain, an XP grant
-/// on a killing blow, and rolling+applying each of `effects` independently
-/// against its own `chance`. Returns `false` (no state changed) if `target`
-/// no longer has `Health` — already despawned, or otherwise gone. Both
+/// active effects + equipment + Dexterity-derived level points, via
+/// `attacker_level_stats`), effective resistance (base + equipped
+/// armor/helmet + the target's own Vitality-derived flat bonus, via
+/// `target_level_stats`), and Might's `bonus_damage_percent` applied to
+/// `base_damage` before any of the above — all computed fresh — see
+/// MECHANICS.md's "Effective combat values are always computed fresh"
+/// section — then `resolve_damage`, `Od` gain, an XP grant on a killing
+/// blow, and rolling+applying each of `effects` independently against its
+/// own `chance`. Returns `false` (no state changed) if `target` no longer
+/// has `Health` — already despawned, or otherwise gone. Both
 /// `attack_system` (target vanished between its nearest-target search and
 /// this call, same tick) and the player weapon-attack path (target vanished
 /// sometime during windup — see `AttackPhase::Windup`'s doc comment) can hit
@@ -238,6 +241,7 @@ pub fn resolve_melee_hit(
     attacker_level_stats: Option<&Stats>,
     mut attacker_progress: AttackerProgress,
     target_equipment: Option<&Equipment>,
+    target_level_stats: Option<&Stats>,
     items: &ItemLibrary,
     healths: &mut Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     all_effects: &mut Query<&mut ActiveEffects>,
@@ -263,9 +267,6 @@ pub fn resolve_melee_hit(
     let level_crit_chance = attacker_level_stats
         .map(|stats| stats.bonus_crit_chance)
         .unwrap_or(0.0);
-    let level_crit_multiplier = attacker_level_stats
-        .map(|stats| stats.bonus_crit_multiplier)
-        .unwrap_or(0.0);
     let effective_stats = CombatStats {
         crit_chance: attacker_stats.crit_chance
             + attacker_effects.stat_bonus(Stat::CritChance)
@@ -273,22 +274,28 @@ pub fn resolve_melee_hit(
             + level_crit_chance,
         crit_multiplier: attacker_stats.crit_multiplier
             + attacker_effects.stat_bonus(Stat::CritMultiplier)
-            + equipment_crit_multiplier
-            + level_crit_multiplier,
+            + equipment_crit_multiplier,
     };
     let equipment_resistance = target_equipment
         .map(|equipment| equipment.resistance_bonus(damage_type, items))
         .unwrap_or(0.0);
+    let level_resistance = target_level_stats
+        .map(|stats| stats.bonus_resistance)
+        .unwrap_or(0.0);
     let effective_resistances = Resistances(
         [(
             damage_type.clone(),
-            resistances.get(damage_type) + equipment_resistance,
+            resistances.get(damage_type) + equipment_resistance + level_resistance,
         )]
         .into_iter()
         .collect(),
     );
+    let level_damage_percent = attacker_level_stats
+        .map(|stats| stats.bonus_damage_percent)
+        .unwrap_or(0.0);
+    let effective_base_damage = base_damage * (1.0 + level_damage_percent);
     let amount = resolve_damage(
-        base_damage,
+        effective_base_damage,
         damage_type,
         &effective_stats,
         &effective_resistances,
@@ -376,6 +383,7 @@ pub fn attack_system(
     mut attackers: Attackers,
     targets: AttackTargets,
     targets_equipment: Query<&Equipment>,
+    targets_level_stats: Query<&Stats>,
     mut healths: Query<(&mut Health, Option<&Resistances>, Option<&XpReward>)>,
     mut all_effects: Query<&mut ActiveEffects>,
     runes: Res<RuneLibrary>,
@@ -445,6 +453,7 @@ pub fn attack_system(
             attacker_level_stats,
             progress,
             targets_equipment.get(target).ok(),
+            targets_level_stats.get(target).ok(),
             &items,
             &mut healths,
             &mut all_effects,
@@ -672,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn attack_system_applies_stats_bonus_crit_chance_and_multiplier() {
+    fn attack_system_applies_stats_bonus_crit_chance_and_damage_percent() {
         let mut world = World::new();
         world.init_resource::<Messages<AttackRequested>>();
         world.init_resource::<RuneLibrary>();
@@ -697,7 +706,7 @@ mod tests {
                 ActiveEffects::default(),
                 Stats {
                     bonus_crit_chance: 1.0,
-                    bonus_crit_multiplier: 1.0,
+                    bonus_damage_percent: 1.0,
                     ..Default::default()
                 },
             ))
@@ -716,9 +725,58 @@ mod tests {
 
         let _ = world.run_system_once(attack_system);
 
-        // base crit_chance 0.0 + bonus 1.0 = guaranteed crit; base
-        // crit_multiplier 1.0 + bonus 1.0 = x2 — 10.0 * 2.0 = 20.0 damage.
+        // base crit_chance 0.0 + bonus 1.0 = guaranteed crit (x1.0 multiplier,
+        // unchanged); base damage 10.0 * (1.0 + bonus_damage_percent 1.0) =
+        // 20.0 damage.
         assert_eq!(world.get::<Health>(target).unwrap().current, 80.0);
+    }
+
+    #[test]
+    fn attack_system_applies_the_targets_vitality_resistance() {
+        let mut world = World::new();
+        world.init_resource::<Messages<AttackRequested>>();
+        world.init_resource::<RuneLibrary>();
+        world.init_resource::<ItemLibrary>();
+
+        let attacker = world
+            .spawn((
+                Position { x: 0.0, y: 0.0 },
+                Facing { x: 1.0, y: 0.0 },
+                MeleeAttack {
+                    range: 5.0,
+                    damage: 10.0,
+                    cooldown: 1.0,
+                    damage_type: primal(),
+                    effects: vec![],
+                },
+                CombatStats {
+                    crit_chance: 0.0,
+                    crit_multiplier: 1.0,
+                },
+                AttackTimer(0.0),
+                ActiveEffects::default(),
+            ))
+            .id();
+        let target = world
+            .spawn((
+                Position { x: 2.0, y: 0.0 },
+                Health::new(100.0),
+                ActiveEffects::default(),
+                Stats {
+                    bonus_resistance: 0.5,
+                    ..Default::default()
+                },
+            ))
+            .id();
+
+        world
+            .resource_mut::<Messages<AttackRequested>>()
+            .write(AttackRequested { attacker });
+
+        let _ = world.run_system_once(attack_system);
+
+        // 10.0 damage * (1.0 - 0.5 resistance) = 5.0 damage.
+        assert_eq!(world.get::<Health>(target).unwrap().current, 95.0);
     }
 
     #[test]

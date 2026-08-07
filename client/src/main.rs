@@ -28,12 +28,16 @@ use content::{
 };
 use game_core::movement::Position;
 use game_core::player::Player;
+// `Attribute` is aliased to `PrimaryAttribute`: `bevy_hanabi::prelude::*`
+// (below) already brings its own unrelated `Attribute` type (particle
+// attributes like `AGE`/`LIFETIME`) into scope, and the two would otherwise
+// collide.
 use game_core::{
-    nearest_interactable_in_range, socketed_item_sell_value, xp_required, Currency, DeltaSeconds,
-    Downed, DroppedLoot, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable,
-    Inventory, Item, ItemDrop, KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stat, Stats,
-    Stunned, UnspentSkillPoints, UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE,
-    VENDOR_PANEL_ID,
+    nearest_interactable_in_range, socketed_item_sell_value, xp_required,
+    Attribute as PrimaryAttribute, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy,
+    EnemyKind, EquipSlot, Equipment, Facing, Health, Interactable, Inventory, Item, ItemDrop,
+    KnownSkills, Level, Od, RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints,
+    UnspentStatPoints, FORGING_PANEL_ID, LEASH_DISTANCE, VENDOR_PANEL_ID,
 };
 use protocol::{
     AllocateStatPointInput, AttackInput, BuyItemInput, CastSkillInput, ConnectAuth, EquipItemInput,
@@ -1256,22 +1260,47 @@ fn inventory_panel_system(
     }
 }
 
-/// Label + the `Stat` variant `AllocateStatPointInput` carries, for each
-/// stat the character panel lets a player allocate into. `bonus_max_health`
-/// isn't listed: `Stat` has no matching variant (see its doc comment in
-/// `game_core::status_effect`), so there's no way to construct a message
-/// for it in the first place.
-const ALLOCATABLE_STATS: [(&str, Stat); 3] = [
-    ("Move Speed", Stat::MoveSpeed),
-    ("Crit Chance", Stat::CritChance),
-    ("Crit Multiplier", Stat::CritMultiplier),
+/// Label + the `PrimaryAttribute` variant `AllocateStatPointInput` carries,
+/// for each attribute the character panel lets a player allocate into
+/// (M8.7 — revises M5's direct-to-secondary-stat spending, see
+/// MECHANICS.md's Attributes section).
+const ALLOCATABLE_ATTRIBUTES: [(&str, PrimaryAttribute); 4] = [
+    ("Might", PrimaryAttribute::Might),
+    ("Dexterity", PrimaryAttribute::Dexterity),
+    ("Vitality", PrimaryAttribute::Vitality),
+    ("Intelligence", PrimaryAttribute::Intelligence),
 ];
 
-fn stat_bonus(stats: &Stats, stat: Stat) -> f32 {
-    match stat {
-        Stat::MoveSpeed => stats.bonus_move_speed,
-        Stat::CritChance => stats.bonus_crit_chance,
-        Stat::CritMultiplier => stats.bonus_crit_multiplier,
+fn attribute_points(attributes: &Attributes, attribute: PrimaryAttribute) -> u32 {
+    match attribute {
+        PrimaryAttribute::Might => attributes.might,
+        PrimaryAttribute::Dexterity => attributes.dexterity,
+        PrimaryAttribute::Vitality => attributes.vitality,
+        PrimaryAttribute::Intelligence => attributes.intelligence,
+    }
+}
+
+/// A short player-facing summary of what `attribute` currently grants, read
+/// from the already-derived `Stats` rather than recomputing it here.
+/// Intelligence has nothing to show yet — it's stored/spendable but has no
+/// wired effect until M8.10-12's rune system (see
+/// `progression::derive_stats`'s doc comment).
+fn attribute_summary(stats: &Stats, attribute: PrimaryAttribute) -> String {
+    match attribute {
+        PrimaryAttribute::Might => {
+            format!("+{:.0}% weapon damage", stats.bonus_damage_percent * 100.0)
+        }
+        PrimaryAttribute::Dexterity => format!(
+            "+{:.0}% attack speed, +{:.1}% crit chance",
+            stats.bonus_attack_speed * 100.0,
+            stats.bonus_crit_chance * 100.0
+        ),
+        PrimaryAttribute::Vitality => format!(
+            "+{:.0} max health, +{:.1}% resistance",
+            stats.bonus_max_health,
+            stats.bonus_resistance * 100.0
+        ),
+        PrimaryAttribute::Intelligence => "not yet wired (M8.10-12)".to_string(),
     }
 }
 
@@ -1281,18 +1310,18 @@ type LocalPlayerCharacter<'w, 's> = Query<
     (
         &'static Level,
         &'static UnspentStatPoints,
+        &'static Attributes,
         &'static Stats,
         &'static UnspentSkillPoints,
         &'static KnownSkills,
     ),
 >;
 
-/// Click-driven level-up panel: stat-point allocation (flat list, `+1` per
-/// click via `AllocateStatPointInput`) and skill learning (`Learn`/`+1` via
-/// `LearnSkillInput`) — the two gaps `UnspentStatPoints`/`UnspentSkillPoints`
-/// have had since M5/M6 (M8 step 2 already wired the stat bonuses into
-/// combat/movement, so this panel is meaningful from the moment it exists).
-/// Skill rows reuse `SKILL_HOTKEYS`' fixed id list rather than a client-side
+/// Click-driven level-up panel: attribute-point allocation (flat list,
+/// `+1` per click via `AllocateStatPointInput`, M8.7) and skill learning
+/// (`Learn`/`+1` via `LearnSkillInput`) — the two gaps
+/// `UnspentStatPoints`/`UnspentSkillPoints` have had since M5/M6. Skill rows
+/// reuse `SKILL_HOTKEYS`' fixed id list rather than a client-side
 /// `SkillLibrary` (which doesn't exist) — same placeholder-content pattern
 /// as the HUD's cooldown rows. Flat spend-a-point list, no prerequisite
 /// tree topology: nothing in `MECHANICS.md`/`DESIGN.md` specifies an actual
@@ -1311,7 +1340,8 @@ fn character_panel_system(
     let Some(entity) = local_player.0 else {
         return;
     };
-    let Ok((level, stat_points, stats, skill_points, known_skills)) = query.get(entity) else {
+    let Ok((level, stat_points, attributes, stats, skill_points, known_skills)) = query.get(entity)
+    else {
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -1332,15 +1362,19 @@ fn character_panel_system(
             ));
 
             ui.separator();
-            ui.heading(format!("Stat points: {}", stat_points.0));
-            for (label, stat) in ALLOCATABLE_STATS {
+            ui.heading(format!("Attribute points: {}", stat_points.0));
+            for (label, attribute) in ALLOCATABLE_ATTRIBUTES {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{label}: +{:.2}", stat_bonus(stats, stat)));
+                    ui.label(format!(
+                        "{label}: {} ({})",
+                        attribute_points(attributes, attribute),
+                        attribute_summary(stats, attribute)
+                    ));
                     if ui
                         .add_enabled(stat_points.0 > 0, egui::Button::new("+1"))
                         .clicked()
                     {
-                        allocate_clicked = Some(stat);
+                        allocate_clicked = Some(attribute);
                     }
                 });
             }
@@ -1364,8 +1398,8 @@ fn character_panel_system(
 
     // Deferred until after `show` closes — same reason as
     // `inventory_panel_system`'s deferred writes.
-    if let Some(stat) = allocate_clicked {
-        allocate_input.write(AllocateStatPointInput { stat });
+    if let Some(attribute) = allocate_clicked {
+        allocate_input.write(AllocateStatPointInput { attribute });
     }
     if let Some(skill_id) = learn_clicked {
         learn_input.write(LearnSkillInput {

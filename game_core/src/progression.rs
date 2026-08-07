@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::player::{Downed, Player};
 use crate::skill::UnspentSkillPoints;
-use crate::status_effect::Stat;
 
 /// Character level and progress toward the next one. See MECHANICS.md's
 /// Progression section for the death-penalty rules `apply_death_xp_penalty`
@@ -22,26 +21,88 @@ impl Default for Level {
     }
 }
 
-/// Points available to spend on `Stats`, granted on level-up — manual
+/// Points available to spend on `Attributes`, granted on level-up — manual
 /// allocation, not automatic per-level growth (see MECHANICS.md). Spent via
 /// `allocate_stat_point`, driven by the M8 stat-allocation panel
-/// (`protocol::AllocateStatPointInput`).
+/// (`protocol::AllocateStatPointInput`). Name predates M8.7's attribute
+/// rework (was spent directly into secondary `Stat`s); kept as-is rather
+/// than renamed, since it's replicated/persisted and a rename is pure
+/// churn with no behavior change.
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UnspentStatPoints(pub u32);
 
-/// Manually-allocated stat investment — reuses the game's existing
-/// mechanical stats (move speed, crit chance/multiplier) rather than
-/// inventing new abstract attributes with no hookup yet. `bonus_max_health`
-/// has no matching `Stat` variant (see that enum's doc comment) and so is
-/// unreachable from `allocate_stat_point` — safely rescaling current health
-/// when max changes needs its own deliberate handling, not a rushed wire-up
-/// alongside the other three.
+/// One of the four primary attributes `allocate_stat_point` spends
+/// `UnspentStatPoints` into — see MECHANICS.md's Attributes section for
+/// what each derives. Distinct from `status_effect::Stat`, which stays the
+/// target for gear/rune/effect bonuses (see that enum's doc comment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Attribute {
+    Might,
+    Dexterity,
+    Vitality,
+    Intelligence,
+}
+
+/// Manually-allocated attribute investment (M8.7, revising M5's
+/// direct-to-secondary-stat spending) — see MECHANICS.md's Attributes
+/// section. Replicated/persisted so the character panel can display and
+/// spend into it; `Stats` (below) is the derived output, recomputed via
+/// `derive_stats` on every spend rather than read directly by combat/
+/// movement code.
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Attributes {
+    pub might: u32,
+    pub dexterity: u32,
+    pub vitality: u32,
+    pub intelligence: u32,
+}
+
+/// Secondary-stat bonuses derived from `Attributes` via `derive_stats` —
+/// the shape combat/movement code actually reads. Recomputed (not
+/// incrementally mutated) on every `allocate_stat_point` spend, so it can
+/// never drift from `Attributes`, the same "effective values computed
+/// fresh" principle MECHANICS.md documents for combat resolution.
+///
+/// Deliberately **no** `bonus_move_speed`/`bonus_crit_multiplier` fields:
+/// MECHANICS.md's Attributes section keeps both gear/rune-only, so no
+/// `Attribute` maps to either — a field here that `derive_stats` never
+/// wrote would be exactly the "stat exists but does nothing" bug class
+/// this project has already been bitten by twice (see DECISIONS.md's M8.6
+/// entry). `intelligence` has no field here either, for the same
+/// leave-it-out-until-wired reason — it's stored/spendable on `Attributes`
+/// but drives nothing until M8.10-12's rune system.
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stats {
     pub bonus_max_health: f32,
-    pub bonus_move_speed: f32,
+    pub bonus_resistance: f32,
+    pub bonus_damage_percent: f32,
     pub bonus_crit_chance: f32,
-    pub bonus_crit_multiplier: f32,
+    pub bonus_attack_speed: f32,
+}
+
+/// Bonus granted per attribute point invested — tuning data, not settled
+/// numbers (see MECHANICS.md's Open questions). `bonus_resistance` is a
+/// flat fraction applied uniformly across every `DamageType`, the same
+/// "small flat resistance bonus" MECHANICS.md's Attributes section
+/// describes for Vitality, stacking with armor's own per-type resistance
+/// (see `combat::resolve_melee_hit`).
+const VITALITY_MAX_HEALTH_PER_POINT: f32 = 10.0;
+const VITALITY_RESISTANCE_PER_POINT: f32 = 0.005;
+const MIGHT_DAMAGE_PERCENT_PER_POINT: f32 = 0.02;
+const DEXTERITY_CRIT_CHANCE_PER_POINT: f32 = 0.005;
+const DEXTERITY_ATTACK_SPEED_PER_POINT: f32 = 0.02;
+
+/// Pure derivation of `Stats` from `Attributes` — see MECHANICS.md's
+/// Attributes section for which attribute feeds which secondary stat.
+/// `Attribute::Intelligence` has no term here; see `Stats`'s doc comment.
+pub fn derive_stats(attributes: &Attributes) -> Stats {
+    Stats {
+        bonus_max_health: attributes.vitality as f32 * VITALITY_MAX_HEALTH_PER_POINT,
+        bonus_resistance: attributes.vitality as f32 * VITALITY_RESISTANCE_PER_POINT,
+        bonus_damage_percent: attributes.might as f32 * MIGHT_DAMAGE_PERCENT_PER_POINT,
+        bonus_crit_chance: attributes.dexterity as f32 * DEXTERITY_CRIT_CHANCE_PER_POINT,
+        bonus_attack_speed: attributes.dexterity as f32 * DEXTERITY_ATTACK_SPEED_PER_POINT,
+    }
 }
 
 /// XP granted to whichever player lands the killing blow — see
@@ -87,29 +148,31 @@ pub fn grant_xp(
     }
 }
 
-/// Bonus granted per point spent on each stat — tuning data, not settled
-/// numbers. Deliberately no `MaxHealth` entry: `Stat` itself has no such
-/// variant (see its doc comment), so `allocate_stat_point`'s `match` is
-/// exhaustive without needing to special-case rejecting it.
-const STAT_POINT_MOVE_SPEED_BONUS: f32 = 2.0;
-const STAT_POINT_CRIT_CHANCE_BONUS: f32 = 0.01;
-const STAT_POINT_CRIT_MULTIPLIER_BONUS: f32 = 0.02;
-
-/// Spends one `UnspentStatPoints` into `stats`, adding that stat's
-/// fixed per-point bonus (see the constants above) — an M8 panel calls
+/// Spends one `UnspentStatPoints` into `attribute`, then recomputes `stats`
+/// from the updated `attributes` via `derive_stats` — an M8 panel calls
 /// this once per button click, same "reject a no-op untrusted input rather
 /// than panic" shape as `item::equip_item`. Returns `false` (no state
-/// changed) if there's no point to spend.
-pub fn allocate_stat_point(unspent: &mut UnspentStatPoints, stats: &mut Stats, stat: Stat) -> bool {
+/// changed) if there's no point to spend. The caller is responsible for any
+/// side effect of a `Stats` change that isn't itself part of `Stats` — e.g.
+/// `Health.max` tracking `bonus_max_health` — since that's entity-specific
+/// wiring outside what a pure progression function should own.
+pub fn allocate_stat_point(
+    unspent: &mut UnspentStatPoints,
+    attributes: &mut Attributes,
+    stats: &mut Stats,
+    attribute: Attribute,
+) -> bool {
     if unspent.0 == 0 {
         return false;
     }
     unspent.0 -= 1;
-    match stat {
-        Stat::MoveSpeed => stats.bonus_move_speed += STAT_POINT_MOVE_SPEED_BONUS,
-        Stat::CritChance => stats.bonus_crit_chance += STAT_POINT_CRIT_CHANCE_BONUS,
-        Stat::CritMultiplier => stats.bonus_crit_multiplier += STAT_POINT_CRIT_MULTIPLIER_BONUS,
+    match attribute {
+        Attribute::Might => attributes.might += 1,
+        Attribute::Dexterity => attributes.dexterity += 1,
+        Attribute::Vitality => attributes.vitality += 1,
+        Attribute::Intelligence => attributes.intelligence += 1,
     }
+    *stats = derive_stats(attributes);
     true
 }
 
@@ -213,47 +276,79 @@ mod tests {
     }
 
     #[test]
-    fn allocate_stat_point_spends_a_point_and_adds_the_matching_bonus() {
+    fn allocate_stat_point_spends_a_point_and_rederives_stats() {
         let mut unspent = UnspentStatPoints(2);
+        let mut attributes = Attributes::default();
         let mut stats = Stats::default();
 
         assert!(allocate_stat_point(
             &mut unspent,
+            &mut attributes,
             &mut stats,
-            Stat::CritChance
+            Attribute::Dexterity
         ));
 
         assert_eq!(unspent.0, 1);
-        assert!((stats.bonus_crit_chance - STAT_POINT_CRIT_CHANCE_BONUS).abs() < 1e-6);
-        assert_eq!(stats.bonus_move_speed, 0.0);
-        assert_eq!(stats.bonus_crit_multiplier, 0.0);
+        assert_eq!(attributes.dexterity, 1);
+        assert!((stats.bonus_crit_chance - DEXTERITY_CRIT_CHANCE_PER_POINT).abs() < 1e-6);
+        assert!((stats.bonus_attack_speed - DEXTERITY_ATTACK_SPEED_PER_POINT).abs() < 1e-6);
+        assert_eq!(stats.bonus_max_health, 0.0);
+        assert_eq!(stats.bonus_damage_percent, 0.0);
     }
 
     #[test]
     fn allocate_stat_point_rejects_when_no_points_are_unspent() {
         let mut unspent = UnspentStatPoints(0);
+        let mut attributes = Attributes::default();
         let mut stats = Stats::default();
 
         assert!(!allocate_stat_point(
             &mut unspent,
+            &mut attributes,
             &mut stats,
-            Stat::MoveSpeed
+            Attribute::Vitality
         ));
 
         assert_eq!(unspent.0, 0);
-        assert_eq!(stats.bonus_move_speed, 0.0);
+        assert_eq!(attributes.vitality, 0);
+        assert_eq!(stats.bonus_max_health, 0.0);
     }
 
     #[test]
     fn allocate_stat_point_accumulates_across_repeated_spends() {
         let mut unspent = UnspentStatPoints(2);
+        let mut attributes = Attributes::default();
         let mut stats = Stats::default();
 
-        allocate_stat_point(&mut unspent, &mut stats, Stat::MoveSpeed);
-        allocate_stat_point(&mut unspent, &mut stats, Stat::MoveSpeed);
+        allocate_stat_point(
+            &mut unspent,
+            &mut attributes,
+            &mut stats,
+            Attribute::Vitality,
+        );
+        allocate_stat_point(
+            &mut unspent,
+            &mut attributes,
+            &mut stats,
+            Attribute::Vitality,
+        );
 
         assert_eq!(unspent.0, 0);
-        assert!((stats.bonus_move_speed - STAT_POINT_MOVE_SPEED_BONUS * 2.0).abs() < 1e-6);
+        assert_eq!(attributes.vitality, 2);
+        assert!((stats.bonus_max_health - VITALITY_MAX_HEALTH_PER_POINT * 2.0).abs() < 1e-6);
+        assert!((stats.bonus_resistance - VITALITY_RESISTANCE_PER_POINT * 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn derive_stats_leaves_intelligence_unwired() {
+        let attributes = Attributes {
+            might: 0,
+            dexterity: 0,
+            vitality: 0,
+            intelligence: 5,
+        };
+
+        assert_eq!(derive_stats(&attributes), Stats::default());
     }
 
     #[test]

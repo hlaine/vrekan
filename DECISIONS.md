@@ -1453,3 +1453,74 @@ persists across tool calls). Always run `cargo run -p server`/`cargo run -p
 client` from the repo root; prefer not to `cd` at all mid-session when
 relative-path-sensitive commands (like starting the server) are coming up
 later in the same session.
+
+## M8.7: primary attributes & attack speed — two shapes confirmed before
+## building, and `Stats`' dead fields removed rather than left inert
+
+**Context.** `MECHANICS.md`'s Attributes section already specified almost
+the entire shape of this milestone (which attribute derives which secondary
+effect, `Stat` staying separate for gear/rune bonuses, Intelligence
+deliberately unwired until M8.10-12) — most of the planning work here was
+reading that section and the existing `Stats`/`allocate_stat_point`
+plumbing closely enough to find the two real gaps it left open, rather than
+re-deciding things `MECHANICS.md` had already settled. See `ROADMAP.md`'s
+M8.7 section for the full implementation writeup; this entry covers the two
+decisions confirmed with the user and a design consequence surfaced during
+implementation, not assumed.
+
+**Decision 1 — Vitality's `bonus_max_health` and `Health.current`.**
+`bonus_max_health` had existed on `Stats` since M5 but was unreachable
+(`Stat` had no matching variant), flagged in the code as needing
+"deliberate handling" for exactly this reason. M8.7 makes Vitality wire
+into it for the first time, raising the real question of what happens to
+`Health.current` when a point is spent mid-game. **Confirmed: ceiling
+only** — `Health.max` rises by the resulting `bonus_max_health` delta,
+`Health.current` is left untouched, no free heal from spending a point
+mid-fight. Matches how the other three attributes' bonuses already never
+retroactively affect anything already in flight (e.g. a Dexterity spend
+mid-recovery doesn't rewind an attack already resolving).
+
+**Decision 2 — protocol/save-format touch, flagged before doing it per
+`CLAUDE.md`'s explicit rule on wire-format changes.** The milestone
+requires a new `Attributes` component that has to be replicated (the
+character panel needs to read/spend it) and persisted (`CharacterSave`).
+Following this project's existing precedent — no field on `CharacterSave`
+has a `#[serde(default)]` fallback, so every past schema change has simply
+required a fresh save rather than carrying a backward-compat shim — this
+was surfaced plainly (new component, `PROTOCOL_ID` bump, a pre-M8.7 local
+save file will fail to load) and confirmed before implementing, rather than
+silently proceeding on the assumption that "the milestone already implies
+this."
+
+**A design consequence surfaced during implementation, not silently
+decided: `Stats` lost two fields it had carried since M5.**
+`MECHANICS.md`'s Attributes section states plainly that `MoveSpeed` and
+crit *multiplier* stay gear/rune-only, not attribute-derived — but that
+section doesn't spell out what that means for `Stats::bonus_move_speed`/
+`bonus_crit_multiplier` specifically, which existed only to hold a *level-
+point* contribution to each. Once `allocate_stat_point` no longer accepts
+a direct `Stat` target at all, nothing would ever write either field again
+— exactly the "stat exists but does nothing" bug class `MECHANICS.md`'s
+"Effective combat values are always computed fresh" section warns about by
+name, and the same class M8.6 caught twice in the session before this one
+(see that entry above). Per `CLAUDE.md`'s "if you're certain something is
+unused, delete it" guidance, both fields were removed outright rather than
+left inert: `combat::resolve_melee_hit` no longer sums a `level_crit_
+multiplier` term (equipment/rune/effect sources for crit multiplier are
+untouched and still work), and `server::apply_move_input` no longer reads
+a `level_bonus` for move speed. This also meant the character panel lost
+its "Move Speed"/"Crit Multiplier" +1 buttons entirely — both stats are now
+purely gear/rune-acquired, never level-point-spendable, a direct and
+necessary consequence of `MECHANICS.md`'s existing design rather than a new
+decision made here.
+
+**Consequences / what's still open:** code-complete, full verification loop
+clean, and **confirmed live** — server run with `RUST_LOG=info,
+game_core=debug`, client connected, combat confirmed feeling fine, no
+specific issue flagged. Not yet committed. The tuning constants
+(`VITALITY_MAX_HEALTH_PER_POINT` and siblings in `progression.rs`) are
+first-guess placeholder numbers, same "tune by feel once playable" framing
+as every other constant of this kind in the codebase — this playtest didn't
+specifically exercise spending points into each attribute one at a time, so
+treat the numbers as still unverified in practice, not just untuned.
+Intelligence remains fully inert until M8.10-12's rune system, as designed.

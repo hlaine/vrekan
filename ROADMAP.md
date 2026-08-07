@@ -860,32 +860,83 @@ combat should be solid first.
 
 ## M8.7 — Primary attributes & attack speed (revises M5)
 
-- [ ] `game_core::progression`: introduce an `Attribute` enum (Might,
+**Implementation status: everything below is built, unit-tested, passes the
+full verification loop (build/test/clippy/fmt), and confirmed live** —
+server started with `RUST_LOG=info,game_core=debug`, client connected,
+combat confirmed feeling fine (no specifics flagged beyond that). Built in
+a session with the user present for a decisions round (`AskUserQuestion`)
+on the two shapes `MECHANICS.md` didn't already settle. **Not yet
+committed** — still uncommitted local changes as of this playtest.
+
+- [x] `game_core::progression`: introduced an `Attribute` enum (Might,
   Dexterity, Vitality, Intelligence) as the new target for
   `allocate_stat_point`'s spend, replacing direct-to-secondary-stat
   spending. Existing `Stat` enum stays as the target for rune/effect
   bonuses — attributes derive `Stats`' bonus_* fields via a new pure
   `derive_stats(&Attributes) -> Stats` function, layered onto that
-  existing plumbing rather than replacing it.
-- [ ] `Stat` gains an `AttackSpeed` variant (needed so runes can grant
+  existing plumbing rather than replacing it: `allocate_stat_point` now
+  increments the new `Attributes` component, then overwrites `Stats` with
+  `derive_stats`'s fresh output, so the two can never drift.
+  **`Stats` itself changed shape**, not just its write path:
+  `bonus_move_speed`/`bonus_crit_multiplier` were removed entirely (no
+  `Attribute` derives either — see the next bullet), and
+  `bonus_resistance`/`bonus_damage_percent`/`bonus_attack_speed` were
+  added. A new `Attributes` component (replicated, persisted) holds the raw
+  invested point counts the character panel displays and spends.
+- [x] `Stat` gains an `AttackSpeed` variant (needed so runes can grant
   attack speed directly, alongside Dexterity's own contribution) — summed
   into effective attack speed the same 4-way way crit chance already is:
-  base (Dexterity-derived) + active effects + equipment/runes + level-up
-  points.
-- [ ] Derived formulas (tuning data, exact curves not final — see
+  active effects + equipment/runes + Dexterity-derived level points, via
+  the new `weapon_attack::effective_attack_speed_bonus` (no separate "base"
+  term — there's no baseline attack-speed scalar to start from, unlike
+  crit chance's `CombatStats.crit_chance`).
+- [x] Derived formulas (tuning data, exact curves not final — see
   `MECHANICS.md`'s Open questions):
-  - Might → % bonus weapon damage
+  - Might → % bonus weapon damage, applied to `base_damage` inside
+    `resolve_melee_hit` before crit/resistance.
   - Dexterity → % attack-speed bonus (feeds M8.6's
     `effective_recovery = base_recovery / (1 + bonus)`, recovery only,
-    never windup) + bonus crit chance
+    never windup, via the new `weapon_attack::effective_recovery`) + bonus
+    crit chance.
   - Vitality → bonus max health + a small flat resistance bonus (stacks
-    additively with M8.6's armor resistance and, later, M8.12's Algiz rune)
+    additively with M8.6's armor resistance and, later, M8.12's Algiz
+    rune) — resistance is target-side: `resolve_melee_hit` gained a
+    `target_level_stats: Option<&Stats>` parameter (mirroring
+    `target_equipment`) so a *defender's* own Vitality investment reduces
+    incoming damage, not the attacker's.
   - Intelligence → stored, spendable, **no wired effect until M8.10-12**
-- [ ] Migrate `allocate_stat_point` tests and the M8 character panel UI
-  (labels, spend targets) from direct secondary stats to attributes.
-- [ ] Tests: derived-stat formulas; attack-speed-to-recovery-time
-  conversion at zero Dexterity and at an extreme high value (confirm the
-  divisor never reaches zero).
+    (`derive_stats` has no term for it at all, deliberately — see
+    `Stats`'s doc comment).
+- [x] **Vitality's `bonus_max_health` interaction with `Health.current`,
+  confirmed with the user rather than guessed**: ceiling-only.
+  `apply_allocate_stat_point_input` raises `Health.max` by exactly the
+  resulting `bonus_max_health` delta on a Vitality spend; `Health.current`
+  is left untouched — no free heal from spending a point mid-fight, the
+  same "a point spend doesn't retroactively affect anything already in
+  flight" behavior the other three attributes already had. A reconnecting
+  character with previously-invested Vitality restores the matching
+  `Health.max` bonus on spawn (`PLAYER_MAX_HEALTH + stats.bonus_max_health`).
+- [x] Migrated `allocate_stat_point`'s tests and the M8 character panel UI
+  (labels, spend targets) from direct secondary stats to attributes — the
+  panel now shows each attribute's raw invested points plus a short
+  player-facing summary of its current derived effect (e.g. "Might: 3
+  (+6% weapon damage)"), read from `Stats` rather than recomputed in the
+  UI layer.
+- [x] Tests: derived-stat formulas (`derive_stats`, `allocate_stat_point`);
+  `effective_recovery`/`effective_attack_speed_bonus` (zero-Dexterity case,
+  and an extreme-high-value case confirming the divisor never reaches
+  zero, per this bullet's original ask); `resolve_melee_hit`'s new Might
+  damage-percent and target-side Vitality resistance terms.
+
+**A protocol-crate touch, flagged and confirmed before doing it (per
+`CLAUDE.md`'s rule on wire-format changes):** the new `Attributes`
+component needed to be replicated (so the character panel can read/spend
+it) and persisted (`CharacterSave` gained an `attributes` field, no
+`#[serde(default)]` fallback, matching this project's existing
+no-backward-compat-shim convention for save-schema changes) —
+`protocol::PROTOCOL_ID` bumped from 1 to 2. This makes a pre-M8.7 local
+save file fail to load; the user confirmed proceeding and accepted needing
+a fresh character.
 
 ## M8.8 — Combat feedback: crit flash & critical-health bleeding
 

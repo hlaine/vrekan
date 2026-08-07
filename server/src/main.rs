@@ -34,7 +34,7 @@ use game_core::{
     learn_skill, nearest_interactable_with_panel, reset_xp_on_full_wipe, revive_system, sell_item,
     skill_cast_system, socket_rune, start_player_windups, tick_od_regen, tick_player_attack_phases,
     tick_skill_cooldowns, tick_status_effects, unequip_item, unsocket_rune, ActiveEffects,
-    AttackPhase, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy, Equipment, Facing,
+    AttackPhase, Attributes, Currency, DeltaSeconds, Downed, DroppedLoot, Enemy, Equipment, Facing,
     InteractOrPickupRequested, Interactable, InteractableLibrary, Inventory, Item, ItemDrop,
     ItemLibrary, KnownSkills, Level, MoveSpeed, Od, Player, Position, Resistances, Reviving,
     RuneInventory, RuneLibrary, SkillCastRequested, SkillCooldowns, SkillLibrary, Stat, Stats,
@@ -434,71 +434,87 @@ fn on_client_connected(
         return;
     }
 
-    let (level, stats, points, known_skills, skill_points, inventory, equipment, runes, currency) =
-        match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
-            Ok(Some(save)) => {
-                if save.password != auth.character_password {
-                    warn!("rejecting client {client_id}: wrong character password");
-                    server.disconnect(client_id);
-                    return;
-                }
-                (
-                    save.level,
-                    save.stats,
-                    save.points,
-                    save.known_skills,
-                    save.skill_points,
-                    save.inventory,
-                    save.equipment,
-                    save.runes,
-                    save.currency,
-                )
-            }
-            Ok(None) => {
-                let save = persistence::CharacterSave {
-                    password: auth.character_password.clone(),
-                    level: Level::default(),
-                    stats: Stats::default(),
-                    points: UnspentStatPoints::default(),
-                    known_skills: KnownSkills::default(),
-                    skill_points: UnspentSkillPoints::default(),
-                    inventory: Inventory::default(),
-                    equipment: Equipment::default(),
-                    runes: RuneInventory::default(),
-                    currency: Currency::default(),
-                };
-                if let Err(error) = persistence::save_character_save(
-                    saves_dir,
-                    &game_id.0,
-                    auth.character_id,
-                    &save,
-                ) {
-                    error!(
-                        "rejecting client {client_id}: failed to create new character save: {error}"
-                    );
-                    server.disconnect(client_id);
-                    return;
-                }
-                (
-                    save.level,
-                    save.stats,
-                    save.points,
-                    save.known_skills,
-                    save.skill_points,
-                    save.inventory,
-                    save.equipment,
-                    save.runes,
-                    save.currency,
-                )
-            }
-            Err(error) => {
-                error!("rejecting client {client_id}: failed to load character save: {error}");
+    let (
+        level,
+        stats,
+        attributes,
+        points,
+        known_skills,
+        skill_points,
+        inventory,
+        equipment,
+        runes,
+        currency,
+    ) = match persistence::load_character_save(saves_dir, &game_id.0, auth.character_id) {
+        Ok(Some(save)) => {
+            if save.password != auth.character_password {
+                warn!("rejecting client {client_id}: wrong character password");
                 server.disconnect(client_id);
                 return;
             }
-        };
+            (
+                save.level,
+                save.stats,
+                save.attributes,
+                save.points,
+                save.known_skills,
+                save.skill_points,
+                save.inventory,
+                save.equipment,
+                save.runes,
+                save.currency,
+            )
+        }
+        Ok(None) => {
+            let save = persistence::CharacterSave {
+                password: auth.character_password.clone(),
+                level: Level::default(),
+                stats: Stats::default(),
+                attributes: Attributes::default(),
+                points: UnspentStatPoints::default(),
+                known_skills: KnownSkills::default(),
+                skill_points: UnspentSkillPoints::default(),
+                inventory: Inventory::default(),
+                equipment: Equipment::default(),
+                runes: RuneInventory::default(),
+                currency: Currency::default(),
+            };
+            if let Err(error) =
+                persistence::save_character_save(saves_dir, &game_id.0, auth.character_id, &save)
+            {
+                error!(
+                    "rejecting client {client_id}: failed to create new character save: {error}"
+                );
+                server.disconnect(client_id);
+                return;
+            }
+            (
+                save.level,
+                save.stats,
+                save.attributes,
+                save.points,
+                save.known_skills,
+                save.skill_points,
+                save.inventory,
+                save.equipment,
+                save.runes,
+                save.currency,
+            )
+        }
+        Err(error) => {
+            error!("rejecting client {client_id}: failed to load character save: {error}");
+            server.disconnect(client_id);
+            return;
+        }
+    };
 
     active_characters.0.insert(auth.character_id, entity);
+
+    // A loaded character may already have Vitality points invested — restore
+    // the matching max-health bonus on spawn rather than always starting at
+    // the flat base, same "effective values computed fresh" principle as
+    // everywhere else `Stats` is read.
+    let max_health = PLAYER_MAX_HEALTH + stats.bonus_max_health;
 
     commands.entity(entity).insert((
         Player,
@@ -507,6 +523,7 @@ fn on_client_connected(
         stats,
         points,
         (
+            attributes,
             known_skills,
             skill_points,
             SkillCooldowns::default(),
@@ -519,7 +536,7 @@ fn on_client_connected(
         Position { x: 0.0, y: 0.0 },
         Facing::default(),
         MoveSpeed(PLAYER_SPEED),
-        Health::new(PLAYER_MAX_HEALTH),
+        Health::new(max_health),
         CombatStats {
             crit_chance: PLAYER_CRIT_CHANCE,
             crit_multiplier: PLAYER_CRIT_MULTIPLIER,
@@ -548,6 +565,7 @@ type PersistedCharacterData<'w, 's> = Query<
         &'static CharacterId,
         &'static Level,
         &'static Stats,
+        &'static Attributes,
         &'static UnspentStatPoints,
         &'static KnownSkills,
         &'static UnspentSkillPoints,
@@ -582,6 +600,7 @@ fn on_character_disconnected(
         character_id,
         level,
         stats,
+        attributes,
         points,
         known_skills,
         skill_points,
@@ -618,6 +637,7 @@ fn on_character_disconnected(
         password,
         level: *level,
         stats: *stats,
+        attributes: *attributes,
         points: *points,
         known_skills: known_skills.clone(),
         skill_points: *skill_points,
@@ -868,17 +888,18 @@ type MovablePlayers<'w, 's> = Query<
         &'static mut LinearVelocity,
         &'static mut Facing,
         Option<&'static Equipment>,
-        Option<&'static Stats>,
         &'static AttackPhase,
     ),
     (With<Player>, Without<Downed>, Without<Stunned>),
 >;
 
-/// A socketed move-speed rune, and a manually-allocated `Stats` point spend,
-/// both add their bonus on top of the base `MoveSpeed`, computed fresh here
-/// rather than mutating the base component — same "never bake a buff into
-/// the base stat" principle as `combat::attack_system`'s equipment/level
-/// crit bonuses.
+/// A socketed move-speed rune adds its bonus on top of the base
+/// `MoveSpeed`, computed fresh here rather than mutating the base component
+/// — same "never bake a buff into the base stat" principle as
+/// `combat::attack_system`'s equipment/level crit bonuses. Move speed is
+/// deliberately gear/rune-only, not attribute-derived (see MECHANICS.md's
+/// Attributes section and `progression::Stats`'s doc comment) — there is no
+/// level-point contribution to add here.
 ///
 /// **Rooted during windup, free to move during recovery** — a starting
 /// assumption per MECHANICS.md's Weapons & attack timing section, not yet
@@ -899,8 +920,7 @@ fn apply_move_input(
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((speed, mut velocity, mut facing, equipment, stats, phase)) =
-            players.get_mut(entity)
+        let Ok((speed, mut velocity, mut facing, equipment, phase)) = players.get_mut(entity)
         else {
             continue;
         };
@@ -912,8 +932,7 @@ fn apply_move_input(
         let equipment_bonus = equipment
             .map(|equipment| equipment.stat_bonus(Stat::MoveSpeed, &runes))
             .unwrap_or(0.0);
-        let level_bonus = stats.map(|stats| stats.bonus_move_speed).unwrap_or(0.0);
-        let effective_speed = speed.0 + equipment_bonus + level_bonus;
+        let effective_speed = speed.0 + equipment_bonus;
         velocity.x = input.x * effective_speed;
         velocity.y = input.y * effective_speed;
         facing.update_from_direction(input.x, input.y);
@@ -1199,19 +1218,33 @@ fn apply_sell_item_input(
 
 /// Turns a client's `AllocateStatPointInput` into
 /// `game_core::allocate_stat_point`'s resolution — a no-op if there's no
-/// unspent point (see that function's doc comment).
+/// unspent point (see that function's doc comment). A Vitality spend raises
+/// `Health.max` by exactly the resulting `bonus_max_health` delta —
+/// **ceiling only**, `Health.current` is left untouched (confirmed with the
+/// user during M8.7 planning: no free heal from spending a point mid-fight,
+/// consistent with how the other three attributes' bonuses never
+/// retroactively affect anything already in flight either).
 fn apply_allocate_stat_point_input(
     mut inputs: MessageReader<FromClient<AllocateStatPointInput>>,
-    mut players: Query<(&mut UnspentStatPoints, &mut Stats)>,
+    mut players: Query<(
+        &mut UnspentStatPoints,
+        &mut Attributes,
+        &mut Stats,
+        &mut Health,
+    )>,
 ) {
     for input in inputs.read() {
         let Some(entity) = input.client_id.entity() else {
             continue;
         };
-        let Ok((mut unspent, mut stats)) = players.get_mut(entity) else {
+        let Ok((mut unspent, mut attributes, mut stats, mut health)) = players.get_mut(entity)
+        else {
             continue;
         };
-        allocate_stat_point(&mut unspent, &mut stats, input.stat);
+        let previous_max_health_bonus = stats.bonus_max_health;
+        if allocate_stat_point(&mut unspent, &mut attributes, &mut stats, input.attribute) {
+            health.max += stats.bonus_max_health - previous_max_health_bonus;
+        }
     }
 }
 

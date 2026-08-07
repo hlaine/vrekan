@@ -32,8 +32,8 @@ pub use item::{
 pub use movement::{leash_system, Facing, MoveSpeed, Position, Velocity, LEASH_DISTANCE};
 pub use player::{Downed, Player};
 pub use progression::{
-    allocate_stat_point, apply_death_xp_penalty, grant_xp, reset_xp_on_full_wipe, xp_required,
-    Level, Stats, UnspentStatPoints, XpReward,
+    allocate_stat_point, apply_death_xp_penalty, derive_stats, grant_xp, reset_xp_on_full_wipe,
+    xp_required, Attribute, Attributes, Level, Stats, UnspentStatPoints, XpReward,
 };
 pub use revive::{revive_system, Reviving};
 pub use skill::{
@@ -46,8 +46,9 @@ pub use status_effect::{
     Stat, Stunned,
 };
 pub use weapon_attack::{
-    effective_weapon_stats, find_attack_target, start_player_windups, tick_player_attack_phases,
-    unarmed_weapon_stats, AttackPhase, AttackPhaseEvent, WeaponStats,
+    effective_attack_speed_bonus, effective_recovery, effective_weapon_stats, find_attack_target,
+    start_player_windups, tick_player_attack_phases, unarmed_weapon_stats, AttackPhase,
+    AttackPhaseEvent, WeaponStats,
 };
 
 use bevy_ecs::prelude::*;

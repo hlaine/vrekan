@@ -3,16 +3,16 @@ use bevy_ecs::prelude::Message;
 use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::connected_client::NetworkId;
 use game_core::{
-    AttackTimer, Currency, Downed, Enemy, EnemyKind, EquipSlot, Equipment, Facing, Health,
-    Interactable, Inventory, ItemDrop, KnownSkills, Level, Od, Position, RuneInventory,
-    SkillCooldowns, Stat, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints,
+    AttackTimer, Attribute, Attributes, Currency, Downed, Enemy, EnemyKind, EquipSlot, Equipment,
+    Facing, Health, Interactable, Inventory, ItemDrop, KnownSkills, Level, Od, Position,
+    RuneInventory, SkillCooldowns, Stats, Stunned, UnspentSkillPoints, UnspentStatPoints,
 };
 use serde::{Deserialize, Serialize};
 
 /// Bump when the wire format changes (replicated component shapes, message
 /// shapes) so incompatible client/server builds refuse to connect instead of
 /// silently desyncing.
-pub const PROTOCOL_ID: u64 = 1;
+pub const PROTOCOL_ID: u64 = 2;
 
 pub const SERVER_PORT: u16 = 5000;
 
@@ -106,11 +106,12 @@ pub struct UnsocketRuneInput {
     pub socket_index: usize,
 }
 
-/// Sent by the M8 stat-allocation panel's `+1` button — spends one
-/// `UnspentStatPoints` into `stat` via `game_core::allocate_stat_point`.
+/// Sent by the M8 character panel's `+1` button — spends one
+/// `UnspentStatPoints` into `attribute` via `game_core::allocate_stat_point`
+/// (M8.7: attributes replaced direct-to-secondary-stat spending).
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllocateStatPointInput {
-    pub stat: Stat,
+    pub attribute: Attribute,
 }
 
 /// Sent by the M8 skill-learning panel's Learn/`+1` button — spends one
@@ -232,6 +233,7 @@ impl Plugin for NetworkPlugin {
             .replicate::<Stunned>()
             .replicate::<Level>()
             .replicate::<Stats>()
+            .replicate::<Attributes>()
             .replicate::<Od>()
             .replicate::<KnownSkills>()
             .replicate::<Inventory>()
